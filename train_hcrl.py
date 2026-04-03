@@ -1,17 +1,83 @@
+"""
+HCRL training with simulated oracle feedback — Knox & Stone (2009).
+
+"Interactively Shaping Agents via Human Reinforcement: The TAMER Framework"
+Knox, W. B., & Stone, P. (K-CAP 2009)
+
+Automated version of train_hcrl_human.py.  A simulated oracle calls
+oracle_feedback() at each timestep (50% trigger probability) to produce
++/- signals based on the CartPole state.  A HCRLRewardModel (MLP regression)
+learns from those signals and predicts rewards when the oracle is silent.
+
+Pipeline
+--------
+1. Each episode: run agent in a headless CartPole env.
+2. oracle_feedback() fires with probability ORACLE_TRIGGER_PROB each step.
+   - +FEEDBACK_WEIGHT when pole is stable and cart centred
+   - -FEEDBACK_WEIGHT when pole is near failure or cart is near edge
+   - 0.0 (silent) otherwise
+3. Reward signal each step:
+   - oracle signal  if oracle fired
+   - reward model prediction  if oracle silent and model trained
+   - env reward (+1/step)  if oracle silent and model not yet trained
+4. After each episode: retrain HCRLRewardModel on all collected (obs, reward) pairs.
+5. Save agent + reward model + history + plot.
+
+Usage
+-----
+    uv run python train_hcrl.py
+    uv run python train_hcrl.py --episodes 200 --seed 0
+    uv run python train_hcrl.py --episodes 500 --seed 1
+
+Note
+----
+The helper functions run_hcrl_agent / save_feedback_log / save_history are
+kept for backward compatibility with feedback_timing_experiment.py.
+"""
+
+import argparse
 import pathlib
 import sys
 import time
 from dataclasses import asdict
 
+sys.stdout.reconfigure(encoding="utf-8")
+
 import gymnasium as gym
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pygame
 
 from cartpole.agents import Agent, QLearningAgent
 from cartpole.entities import Action, EpisodeHistory, EpisodeHistoryRecord, Observation, Reward
+from cartpole.oracle import oracle_feedback
 from cartpole.reward_model import HCRLRewardModel
 
+# ---------------------------------------------------------------------------
+# Agent hyper-parameters — identical to baseline / RLHF for fair comparison
+# ---------------------------------------------------------------------------
+AGENT_LR                = 0.05
+AGENT_DISCOUNT          = 0.95
+AGENT_EXPLORATION       = 0.5
+AGENT_EXPLORATION_DECAY = 0.99
+
+# Oracle / feedback
+ORACLE_TRIGGER_PROB     = 0.5    # matches cartpole/oracle.py default
+FEEDBACK_WEIGHT         = 10.0
+TERMINATE_PENALTY       = 50.0
+
+# Reward model
+REWARD_MODEL_LR         = 1e-3
+REWARD_MODEL_HIDDEN     = 64
+REWARD_MODEL_EPOCHS     = 20
+
+MAX_TIMESTEPS           = 200
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible helpers (used by feedback_timing_experiment.py)
+# ---------------------------------------------------------------------------
 
 def run_hcrl_agent(
     agent: Agent,
@@ -89,16 +155,16 @@ def run_hcrl_agent(
         for episode_index in range(max_episodes_to_run):
             observation, _ = env.reset()
             action = agent.begin_episode(observation)
-            
+
             # Reset feedback signal tracker for printing
             episode_feedback_count = 0
 
             for timestep_index in range(max_timesteps_per_episode):
-                
+
                 # --- [HCRL COMPONENT] Listen for Human Feedback ---
                 human_reward = 0.0
                 in_feedback_window = fb_start <= episode_index < fb_end
-                
+
                 # We pump pygame events to catch keystrokes when the debug window is active
                 for event in pygame.event.get():
                     if event.type == pygame.KEYDOWN:
@@ -186,7 +252,7 @@ def run_hcrl_agent(
                             is_successful=is_successful,
                         )
                     )
-                    
+
                     if verbose and episode_history_plotter:
                         episode_history_plotter.update_plot()
 
@@ -200,7 +266,7 @@ def run_hcrl_agent(
                     if episode_history.is_goal_reached():
                         print(f"SUCCESS: Goal reached after {episode_index + 1} episodes!")
                         return episode_history, feedback_log
-            
+
                     break
 
         print(f"FAILURE: Goal not reached after {max_episodes_to_run} episodes.")
@@ -235,32 +301,165 @@ def save_history(history: EpisodeHistory, experiment_dir: str, filename: str = "
     return file_path
 
 
-def main() -> None:
-    # Always turn on verbose for HCRL so human can see and interact
-    verbose = True
-    random_state = np.random.default_rng(seed=0)
+# ---------------------------------------------------------------------------
+# Automated oracle training
+# ---------------------------------------------------------------------------
 
-    # render_mode must be human
-    env = gym.make("CartPole-v1", render_mode="human")
-    
+def train(total_episodes: int, seed: int) -> None:
+    """Train with a simulated oracle (no human required)."""
+    output_dir = pathlib.Path("experiment-results") / f"ep{total_episodes}" / "hcrl-oracle"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 60)
+    print(f"  HCRL (oracle)  —  {total_episodes} episodes  seed={seed}")
+    print(f"  Oracle trigger prob: {ORACLE_TRIGGER_PROB}")
+    print(f"  Feedback weight:     ±{FEEDBACK_WEIGHT}")
+    print(f"  Output: {output_dir}")
+    print("=" * 60)
+
+    rng = np.random.default_rng(seed)
+    env = gym.make("CartPole-v1")
+
     agent = QLearningAgent(
-        learning_rate=0.05,
-        discount_factor=0.95,
-        exploration_rate=0.5,
-        exploration_decay_rate=0.99,
-        random_state=random_state,
+        learning_rate=AGENT_LR,
+        discount_factor=AGENT_DISCOUNT,
+        exploration_rate=AGENT_EXPLORATION,
+        exploration_decay_rate=AGENT_EXPLORATION_DECAY,
+        random_state=rng,
     )
 
-    reward_model = HCRLRewardModel(obs_dim=4, hidden_dim=64, lr=1e-3)
-
-    episode_history, feedback_log = run_hcrl_agent(
-        agent=agent, env=env, verbose=verbose, reward_model=reward_model
+    reward_model = HCRLRewardModel(
+        obs_dim=env.observation_space.shape[0],
+        hidden_dim=REWARD_MODEL_HIDDEN,
+        lr=REWARD_MODEL_LR,
     )
-    save_history(episode_history, experiment_dir="experiment-results")
-    save_feedback_log(feedback_log, experiment_dir="experiment-results")
-    agent.save("experiment-results/hcrl_model.npz")
-    reward_model.save("experiment-results/hcrl_reward_model.npz")
 
+    episode_lengths: list[int]   = []
+    rm_losses:       list[float] = []
+    total_feedback   = 0
+    model_ready      = False
+
+    # Growing buffer: all (obs, oracle_reward) pairs collected so far
+    rm_obs_buf:    list[np.ndarray] = []
+    rm_reward_buf: list[float]      = []
+
+    print(f"\n{'Episode':>8} {'Length':>7} {'Avg10':>7} {'FB_total':>9} {'RM loss':>9}")
+    print("-" * 46)
+
+    for ep in range(total_episodes):
+        obs, _ = env.reset()
+        action = agent.begin_episode(obs)
+
+        for t in range(MAX_TIMESTEPS):
+            next_obs, env_reward, terminated, truncated, _ = env.step(action)
+
+            # Oracle fires with ORACLE_TRIGGER_PROB probability
+            oracle_signal = oracle_feedback(obs, FEEDBACK_WEIGHT, rng,
+                                            trigger_prob=ORACLE_TRIGGER_PROB)
+
+            if oracle_signal != 0.0:
+                total_feedback += 1
+                rm_obs_buf.append(obs.copy())
+                rm_reward_buf.append(oracle_signal)
+                shaped = oracle_signal
+            elif model_ready:
+                shaped = float(reward_model.predict(obs))
+            else:
+                shaped = env_reward   # fallback before model has data
+
+            if terminated and t < MAX_TIMESTEPS - 1:
+                shaped -= TERMINATE_PENALTY
+
+            action = agent.act(next_obs, shaped)
+            obs = next_obs
+
+            if terminated or truncated:
+                break
+
+        ep_len = t + 1
+        episode_lengths.append(ep_len)
+
+        # Retrain reward model after every episode
+        if len(rm_obs_buf) >= 2:
+            obs_arr = np.array(rm_obs_buf)
+            rew_arr = np.array(rm_reward_buf)
+            loss = reward_model.train_on_feedback(obs_arr, rew_arr, epochs=REWARD_MODEL_EPOCHS)
+            rm_losses.append(loss)
+            model_ready = True
+            loss_str = f"{loss:9.4f}"
+        else:
+            loss_str = "      n/a"
+
+        if (ep + 1) % max(1, total_episodes // 10) == 0 or ep == 0:
+            avg10 = np.mean(episode_lengths[-10:])
+            print(f"  {ep+1:6d}  {ep_len:6d}  {avg10:7.1f}  {total_feedback:8d}  {loss_str}")
+
+    env.close()
+
+    # ── Save ──────────────────────────────────────────────────────────────
+    agent.save(output_dir / f"hcrl_oracle_s{seed}_model.npz")
+    reward_model.save(output_dir / f"hcrl_oracle_s{seed}_reward_model.npz")
+    pd.DataFrame({"episode_length": episode_lengths}).to_csv(
+        output_dir / f"hcrl_oracle_s{seed}_history.csv", index_label="episode_index"
+    )
+    print(f"\nSaved to {output_dir}/")
+    print(f"Total oracle feedback signals: {total_feedback}")
+
+    # ── Plot ──────────────────────────────────────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig.suptitle(
+        f"HCRL (oracle) — {total_episodes} episodes, seed={seed}, {total_feedback} signals",
+        fontsize=13,
+    )
+
+    ax = axes[0]
+    lengths = np.array(episode_lengths)
+    ax.plot(lengths, alpha=0.3, color="forestgreen")
+    window = 20
+    if len(lengths) >= window:
+        rolling = np.convolve(lengths, np.ones(window) / window, mode="valid")
+        ax.plot(
+            range(window - 1, len(lengths)), rolling,
+            color="forestgreen", linewidth=2, label=f"Rolling mean ({window})"
+        )
+    ax.axhline(195, color="gray", linestyle="--", alpha=0.5, label="Goal: 195")
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Length (timesteps)")
+    ax.set_title("Policy performance")
+    ax.legend(fontsize=8)
+    ax.set_ylim(0, MAX_TIMESTEPS + 10)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1]
+    if rm_losses:
+        ax.plot(rm_losses, color="darkorange", marker="o", markersize=3)
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Reward model MSE loss")
+    ax.set_title(f"Reward model ({total_feedback} oracle signals)")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plot_path = output_dir / f"hcrl_oracle_s{seed}_results.png"
+    plt.savefig(plot_path, dpi=120)
+    print(f"Plot saved to {plot_path}")
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="HCRL training with simulated oracle feedback"
+    )
+    parser.add_argument(
+        "--episodes", type=int, default=100,
+        help="Total training episodes (default: 100)",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=0,
+        help="Random seed (default: 0)",
+    )
+    args = parser.parse_args()
+    train(args.episodes, args.seed)

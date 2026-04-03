@@ -44,12 +44,10 @@ from cartpole.reward_model import RewardModel
 # Config
 # ---------------------------------------------------------------------------
 
-OUTPUT_DIR = pathlib.Path("experiment-results")
-
-SEED = 2
+WARMUP_FRACTION     = 0.20  # fraction of total episodes used as warm-up
 
 # Segments
-SEGMENT_LENGTH      = 50    # timesteps per clip
+SEGMENT_LENGTH      = 50    # timesteps per clip (scales up during training)
 WARMUP_SEGMENTS     = 20    # segments collected before any labelling
 SEGMENTS_PER_ITER   = 4     # new segments per iteration
 SEGMENT_BUFFER_SIZE = 300
@@ -60,14 +58,12 @@ PAIRS_PER_ITER      = 4     # pairs shown each iteration
 REWARD_MODEL_EPOCHS = 50    # gradient steps after each labelling round
 
 # RL
-WARMUP_EPISODES         = 64
-NUM_ITERATIONS          = 17   # 64 + 17×8 = 200 episodes total
 EPISODES_PER_ITER       = 8
 MAX_TIMESTEPS           = 200
 
-# Agent
-AGENT_LR                = 0.2
-AGENT_DISCOUNT          = 1.0
+# Agent — identical to baseline / HCRL for fair comparison
+AGENT_LR                = 0.05
+AGENT_DISCOUNT          = 0.95
 AGENT_EXPLORATION       = 0.5
 AGENT_EXPLORATION_DECAY = 0.99
 
@@ -398,10 +394,21 @@ def collect_preferences(
 # Training
 # ---------------------------------------------------------------------------
 
-def train() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def train(total_episodes: int = 100, seed: int = 0) -> None:
+    warmup_episodes = max(10, int(total_episodes * WARMUP_FRACTION))
+    remaining       = total_episodes - warmup_episodes
+    num_iterations  = max(1, remaining // EPISODES_PER_ITER)
 
-    rng   = np.random.default_rng(SEED)
+    output_dir = pathlib.Path("experiment-results") / f"ep{total_episodes}" / "rlhf-human"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 60)
+    print(f"  RLHF (human)  —  {total_episodes} episodes  seed={seed}")
+    print(f"  Warm-up: {warmup_episodes} eps  |  Iterations: {num_iterations} × {EPISODES_PER_ITER} eps")
+    print(f"  Output: {output_dir}")
+    print("=" * 60)
+
+    rng   = np.random.default_rng(seed)
     # rgb_array env for segment collection (frames for human display)
     env   = gym.make("CartPole-v1", render_mode="rgb_array")
     # headless env for RL episode training
@@ -460,10 +467,10 @@ def train() -> None:
     # Phase 1 — Warm-up: train on env reward, collect initial segments    #
     # ------------------------------------------------------------------ #
     print("=== Phase 1: Warm-up ===")
-    for ep in range(WARMUP_EPISODES):
+    for ep in range(warmup_episodes):
         length = run_episode(env_rl, agent, reward_model=None)
         episode_lengths.append(length)
-        if (ep + 1) % 10 == 0:
+        if (ep + 1) % max(1, warmup_episodes // 5) == 0:
             print(f"  Episode {ep+1:3d}  avg(10)={np.mean(episode_lengths[-10:]):.1f}")
 
     print(f"\nCollecting {WARMUP_SEGMENTS} warm-up segments…")
@@ -493,7 +500,7 @@ def train() -> None:
     # Phase 3 — RLHF main loop                                            #
     # ------------------------------------------------------------------ #
     print("\n=== Phase 3: RLHF loop ===")
-    for iteration in range(1, NUM_ITERATIONS + 1):
+    for iteration in range(1, num_iterations + 1):
 
         # Check for quit (window closed between iterations)
         if _pump_quit():
@@ -510,7 +517,7 @@ def train() -> None:
         # Clip length and FPS scale linearly with iteration:
         #   iter 1  → seg_len=25,  fps=15
         #   iter 59 → seg_len=100, fps=45
-        progress = (iteration - 1) / max(NUM_ITERATIONS - 1, 1)   # 0.0 → 1.0
+        progress = (iteration - 1) / max(num_iterations - 1, 1)   # 0.0 → 1.0
         iter_seg_len = int(25 + 75 * progress)    # 25 → 100
         iter_fps     = int(15 + 30 * progress)    # 15 → 45
 
@@ -538,7 +545,7 @@ def train() -> None:
 
         avg_len = np.mean(iter_lengths)
         print(
-            f"  Iter {iteration:3d}/{NUM_ITERATIONS}"
+            f"  Iter {iteration:3d}/{num_iterations}"
             f"  avg_ep={avg_len:6.1f}"
             f"  rm_loss={loss:.4f}"
             f"  labels_total={human_labels}"
@@ -556,16 +563,20 @@ def train() -> None:
     # ------------------------------------------------------------------ #
     # Save                                                                 #
     # ------------------------------------------------------------------ #
-    reward_model.save(OUTPUT_DIR / "reward_model_human.npz")
-    agent.save(OUTPUT_DIR / "rlhf_human_model.npz")
-    print(f"Agent saved to {OUTPUT_DIR / 'rlhf_human_model.npz'}")
+    reward_model.save(output_dir / f"rlhf_human_s{seed}_reward_model.npz")
+    agent.save(output_dir / f"rlhf_human_s{seed}_model.npz")
+    import pandas as pd
+    pd.DataFrame({"episode_length": episode_lengths}).to_csv(
+        output_dir / f"rlhf_human_s{seed}_history.csv", index_label="episode_index"
+    )
+    print(f"\nSaved to {output_dir}/")
 
     # ------------------------------------------------------------------ #
     # Plot                                                                 #
     # ------------------------------------------------------------------ #
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     fig.suptitle(
-        f"RLHF (Human) on CartPole — {human_labels} preference labels",
+        f"RLHF (Human) — {total_episodes} episodes, seed={seed}, {human_labels} labels",
         fontsize=13,
     )
 
@@ -577,7 +588,7 @@ def train() -> None:
         rolling = np.convolve(lengths, np.ones(window) / window, mode="valid")
         ax.plot(range(window - 1, len(lengths)), rolling, color="steelblue",
                 linewidth=2, label=f"Rolling mean ({window})")
-    ax.axvline(WARMUP_EPISODES, color="orange", linestyle="--", linewidth=1,
+    ax.axvline(warmup_episodes, color="orange", linestyle="--", linewidth=1,
                label="RLHF starts")
     ax.set_xlabel("Episode")
     ax.set_ylabel("Length (timesteps)")
@@ -592,11 +603,18 @@ def train() -> None:
     ax.set_title(f"Reward model  ({human_labels} human labels)")
 
     plt.tight_layout()
-    plot_path = OUTPUT_DIR / "rlhf_human_results.png"
+    plot_path = output_dir / f"rlhf_human_s{seed}_results.png"
     plt.savefig(plot_path, dpi=120)
-    print(f"\nPlot saved to {plot_path}")
+    print(f"Plot saved to {plot_path}")
     plt.show()
 
 
 if __name__ == "__main__":
-    train()
+    import argparse
+    parser = argparse.ArgumentParser(description="RLHF training with real human clip comparisons")
+    parser.add_argument("--episodes", type=int, default=100,
+                        help="Total training episodes (default: 100)")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Random seed (default: 0)")
+    args = parser.parse_args()
+    train(args.episodes, args.seed)

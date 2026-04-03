@@ -39,6 +39,7 @@ from matplotlib import pyplot as plt
 from cartpole.agents import QLearningAgent
 from cartpole.entities import EpisodeHistory, EpisodeHistoryRecord
 from cartpole.oracle import oracle_feedback
+from cartpole.reward_model import HCRLRewardModel
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -53,15 +54,22 @@ def get_experiment_dir(max_episodes: int) -> pathlib.Path:
 
 # --- Training loop with oracle HCRL ---
 
-def run_oracle_hcrl(weight: float, seed: int, max_episodes: int) -> pd.DataFrame:
+def run_oracle_hcrl(weight: float, seed: int, max_episodes: int):
     """
     Train a Q-Learning agent with oracle human feedback at the given reward weight.
-    Returns episode history as a DataFrame.
+
+    Pipeline (matches train_hcrl.py):
+      1. oracle_feedback() fires each step with 50% probability.
+      2. If oracle fires  → use signal directly; add to reward model buffer.
+      3. If oracle silent → use HCRLRewardModel prediction (once trained).
+      4. Fallback to env reward (+1/step) before model has data.
+      5. Retrain reward model after each episode.
+
+    Returns (episode_df, agent, reward_model).
     Feedback window: all episodes (Full Feedback).
     """
     rng = np.random.default_rng(seed=seed)
     env = gym.make("CartPole-v1")
-    fb_start, fb_end = 0, max_episodes
 
     agent = QLearningAgent(
         learning_rate=0.05,
@@ -71,34 +79,55 @@ def run_oracle_hcrl(weight: float, seed: int, max_episodes: int) -> pd.DataFrame
         random_state=rng,
     )
 
+    reward_model = HCRLRewardModel(obs_dim=env.observation_space.shape[0],
+                                   hidden_dim=64, lr=1e-3)
+    model_ready = False
+    rm_obs_buf:    list[np.ndarray] = []
+    rm_reward_buf: list[float]      = []
+
     records = []
     for episode_index in range(max_episodes):
-        observation, _ = env.reset()
-        action = agent.begin_episode(observation)
-        in_window = fb_start <= episode_index < fb_end
+        obs, _ = env.reset()
+        action = agent.begin_episode(obs)
 
-        for timestep_index in range(MAX_TIMESTEPS):
-            observation, step_reward, terminated, _, _ = env.step(action)
-            human_reward = oracle_feedback(observation, weight, rng) if in_window else 0.0
+        for t in range(MAX_TIMESTEPS):
+            next_obs, env_reward, terminated, truncated, _ = env.step(action)
 
-            is_successful = timestep_index >= MAX_TIMESTEPS - 1
-            if terminated and not is_successful:
-                total_reward = float(-TERMINATE_PENALTY) + human_reward
+            oracle_signal = oracle_feedback(obs, weight, rng)
+
+            if oracle_signal != 0.0:
+                rm_obs_buf.append(obs.copy())
+                rm_reward_buf.append(oracle_signal)
+                shaped = oracle_signal
+            elif model_ready:
+                shaped = float(reward_model.predict(obs))
             else:
-                total_reward = float(step_reward) + human_reward
+                shaped = env_reward  # fallback before model has data
 
-            action = agent.act(observation, total_reward)
+            is_successful = t >= MAX_TIMESTEPS - 1
+            if terminated and not is_successful:
+                shaped += float(-TERMINATE_PENALTY)
 
-            if terminated or is_successful:
+            action = agent.act(next_obs, shaped)
+            obs = next_obs
+
+            if terminated or truncated or is_successful:
                 records.append({
-                    "episode_index": episode_index,
-                    "episode_length": timestep_index + 1,
-                    "is_successful": is_successful,
+                    "episode_index":  episode_index,
+                    "episode_length": t + 1,
+                    "is_successful":  is_successful,
                 })
                 break
 
+        # Retrain reward model after each episode
+        if len(rm_obs_buf) >= 2:
+            reward_model.train_on_feedback(
+                np.array(rm_obs_buf), np.array(rm_reward_buf), epochs=20
+            )
+            model_ready = True
+
     env.close()
-    return pd.DataFrame(records).set_index("episode_index"), agent
+    return pd.DataFrame(records).set_index("episode_index"), agent, reward_model
 
 
 # --- Run all conditions ---
@@ -114,10 +143,11 @@ def run_sensitivity(max_episodes: int):
         for seed in SEEDS:
             done += 1
             print(f"[{done}/{total}] weight={weight:>3}, seed={seed}  ...", end=" ", flush=True)
-            df, agent = run_oracle_hcrl(weight, seed, max_episodes)
+            df, agent, reward_model = run_oracle_hcrl(weight, seed, max_episodes)
             path = experiment_dir / f"w{weight}_s{seed}.csv"
             df.to_csv(path)
             agent.save(experiment_dir / f"w{weight}_s{seed}_model.npz")
+            reward_model.save(experiment_dir / f"w{weight}_s{seed}_reward_model.npz")
             mean = df["episode_length"].mean()
             print(f"mean={mean:.1f}")
 

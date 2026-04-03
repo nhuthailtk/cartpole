@@ -45,6 +45,7 @@ from matplotlib import pyplot as plt
 from cartpole.agents import QLearningAgent
 from cartpole.entities import EpisodeHistory, EpisodeHistoryRecord
 from cartpole.oracle import oracle_feedback
+from cartpole.reward_model import HCRLRewardModel
 from train_hcrl import run_hcrl_agent, save_feedback_log, save_history
 
 
@@ -78,8 +79,21 @@ def run_oracle_condition(
     max_episodes: int,
     seed: int,
     feedback_weight: float = 10.0,
-) -> tuple[EpisodeHistory, list[dict]]:
-    """Train one timing condition using oracle feedback (fully automated)."""
+):
+    """
+    Train one timing condition using oracle feedback + HCRLRewardModel.
+
+    Pipeline (matches train_hcrl.py):
+      - Inside feedback window: oracle fires each step (50% prob).
+          oracle signal → add to reward model buffer; use as reward.
+          oracle silent  → use HCRLRewardModel prediction (if trained).
+      - Outside feedback window: no new oracle signals.
+          Use HCRLRewardModel prediction (if trained) or env reward (fallback).
+      - Reward model retrained after every episode.
+
+    Returns (episode_history, feedback_log, agent, reward_model).
+    """
+    import time
     rng = np.random.default_rng(seed=seed)
     env = gym.make("CartPole-v1")
     fb_start, fb_end = window
@@ -92,44 +106,60 @@ def run_oracle_condition(
         random_state=rng,
     )
 
+    reward_model = HCRLRewardModel(obs_dim=env.observation_space.shape[0],
+                                   hidden_dim=64, lr=1e-3)
+    model_ready = False
+    rm_obs_buf:    list[np.ndarray] = []
+    rm_reward_buf: list[float]      = []
+
     episode_history = EpisodeHistory(
         max_timesteps_per_episode=MAX_TIMESTEPS,
         goal_avg_episode_length=195,
         goal_consecutive_episodes=30,
     )
     feedback_log: list[dict] = []
-    import time
     t0 = time.time()
 
     for episode_index in range(max_episodes):
-        observation, _ = env.reset()
-        action = agent.begin_episode(observation)
+        obs, _ = env.reset()
+        action = agent.begin_episode(obs)
         in_window = fb_start <= episode_index < fb_end
 
         for timestep_index in range(MAX_TIMESTEPS):
-            observation, step_reward, terminated, _, _ = env.step(action)
+            next_obs, env_reward, terminated, truncated, _ = env.step(action)
 
-            human_reward = oracle_feedback(observation, feedback_weight, rng) if in_window else 0.0
-            if human_reward != 0.0:
+            if in_window:
+                oracle_signal = oracle_feedback(obs, feedback_weight, rng)
+            else:
+                oracle_signal = 0.0  # feedback window closed
+
+            if oracle_signal != 0.0:
+                rm_obs_buf.append(obs.copy())
+                rm_reward_buf.append(oracle_signal)
+                shaped = oracle_signal
                 feedback_log.append({
-                    "timestamp": time.time() - t0,
-                    "episode": episode_index,
-                    "timestep": timestep_index,
-                    "feedback": "positive" if human_reward > 0 else "negative",
-                    "magnitude": abs(human_reward),
-                    "reward": human_reward,
-                    "cart_position": float(observation[0]),
-                    "cart_velocity": float(observation[1]),
-                    "pole_angle": float(observation[2]),
-                    "pole_velocity": float(observation[3]),
+                    "timestamp":     time.time() - t0,
+                    "episode":       episode_index,
+                    "timestep":      timestep_index,
+                    "feedback":      "positive" if oracle_signal > 0 else "negative",
+                    "magnitude":     abs(oracle_signal),
+                    "reward":        oracle_signal,
+                    "cart_position": float(obs[0]),
+                    "cart_velocity": float(obs[1]),
+                    "pole_angle":    float(obs[2]),
+                    "pole_velocity": float(obs[3]),
                 })
+            elif model_ready:
+                shaped = float(reward_model.predict(obs))
+            else:
+                shaped = env_reward  # fallback before model has data
+
             is_successful = timestep_index >= MAX_TIMESTEPS - 1
             if terminated and not is_successful:
-                total_reward = float(-TERMINATE_PENALTY) + human_reward
-            else:
-                total_reward = float(step_reward) + human_reward
+                shaped += float(-TERMINATE_PENALTY)
 
-            action = agent.act(observation, total_reward)
+            action = agent.act(next_obs, shaped)
+            obs = next_obs
 
             if terminated or is_successful:
                 episode_history.record_episode(
@@ -141,9 +171,16 @@ def run_oracle_condition(
                 )
                 break
 
+        # Retrain reward model after each episode
+        if len(rm_obs_buf) >= 2:
+            reward_model.train_on_feedback(
+                np.array(rm_obs_buf), np.array(rm_reward_buf), epochs=20
+            )
+            model_ready = True
+
     env.close()
     print(f"    {name}: {max_episodes} eps done, feedback={len(feedback_log)}")
-    return episode_history, feedback_log, agent
+    return episode_history, feedback_log, agent, reward_model
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +211,7 @@ def run_experiment(max_episodes: int, auto: bool, experiment_dir: pathlib.Path) 
             print(f"  [{done}/{total}] seed={seed} ...", end=" ", flush=True)
 
             if auto:
-                history, feedback_log, agent = run_oracle_condition(
+                history, feedback_log, agent, reward_model = run_oracle_condition(
                     name=name, window=window, max_episodes=max_episodes, seed=seed,
                 )
                 save_history(history, str(experiment_dir),
@@ -182,6 +219,7 @@ def run_experiment(max_episodes: int, auto: bool, experiment_dir: pathlib.Path) 
                 save_feedback_log(feedback_log, str(experiment_dir),
                                   filename=f"{name}_s{seed}_feedback_log.csv")
                 agent.save(str(experiment_dir / f"{name}_s{seed}_model.npz"))
+                reward_model.save(str(experiment_dir / f"{name}_s{seed}_reward_model.npz"))
                 lengths = [r.episode_length for r in history.all_records()]
                 print(f"mean={np.mean(lengths):.1f}, last-30={np.mean(lengths[-30:]):.1f}")
             else:

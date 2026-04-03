@@ -6,62 +6,60 @@ Christiano, Leike, Brown, Martic, Legg, Amodei (NeurIPS 2017)
 
 Pipeline
 --------
-1. Warm-up: collect segments with an untrained (random-ish) policy.
-2. Bootstrap reward model from initial preference labels.
-3. Main loop (repeated for NUM_ITERATIONS):
-   a. Run episodes using the reward model's predictions as the RL reward.
+1. Warm-up (20% of total episodes) with env reward; collect initial segments.
+2. Bootstrap reward model from initial oracle preference labels.
+3. Main loop for remaining 80% of episodes:
+   a. Run EPISODES_PER_ITER episodes using the reward model as reward signal.
    b. Collect new trajectory segments.
    c. Sample pairs, query simulated oracle for preferences.
    d. Train reward model on accumulated preferences.
-4. Plot learning curves.
+4. Save agent + history + plot.
 
 Usage
 -----
-    python train_rlhf.py
+    uv run python train_rlhf.py
+    uv run python train_rlhf.py --episodes 200 --seed 0
+    uv run python train_rlhf.py --episodes 500 --seed 1
 """
 
+import argparse
 import collections
 import pathlib
-import random
+import sys
+
+sys.stdout.reconfigure(encoding="utf-8")
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 from cartpole.agents import QLearningAgent
-from cartpole.entities import EpisodeHistory, EpisodeHistoryRecord
 from cartpole.reward_model import RewardModel, oracle_preference
 
 # ---------------------------------------------------------------------------
-# Hyper-parameters
+# Fixed hyper-parameters (shared with baseline / HCRL for fair comparison)
 # ---------------------------------------------------------------------------
 
-OUTPUT_DIR              = pathlib.Path("experiment-results")
-
-SEED                    = 42
+# Agent — identical to run.py and feedback_timing_experiment.py
+AGENT_LR                = 0.05
+AGENT_DISCOUNT          = 0.95
+AGENT_EXPLORATION       = 0.5
+AGENT_EXPLORATION_DECAY = 0.99
 
 # Segment / preference collection
 SEGMENT_LENGTH          = 25    # timesteps per clip shown to oracle
-WARMUP_SEGMENTS         = 60    # initial segments collected before RL starts
-SEGMENTS_PER_ITER       = 10    # new segments added each iteration
-PAIRS_PER_ITER          = 32    # preference queries per reward-model update
+WARMUP_FRACTION         = 0.20  # fraction of total episodes used as warm-up
+EPISODES_PER_ITER       = 8     # policy episodes per RLHF iteration
+WARMUP_SEGMENTS         = 40    # initial segments collected before RL starts
+SEGMENTS_PER_ITER       = 8     # new segments added each iteration
+PAIRS_PER_ITER          = 24    # preference queries per reward-model update
 REWARD_MODEL_EPOCHS     = 40    # gradient steps per reward-model update
-SEGMENT_BUFFER_SIZE     = 500   # max segments kept in replay buffer
-
-# RL training
-WARMUP_EPISODES         = 50    # episodes with env reward to kick-start the policy
-NUM_ITERATIONS          = 60    # main RLHF iterations
-EPISODES_PER_ITER       = 8     # policy episodes per iteration
+SEGMENT_BUFFER_SIZE     = 400   # max segments kept in replay buffer
 
 # Reward model
 REWARD_MODEL_LR         = 3e-4
 REWARD_MODEL_HIDDEN     = 64
-
-# QLearning agent defaults (same as the existing Q-learning experiments)
-AGENT_LR                = 0.2
-AGENT_DISCOUNT          = 1.0
-AGENT_EXPLORATION       = 0.5
-AGENT_EXPLORATION_DECAY = 0.99
 
 MAX_TIMESTEPS           = 200   # CartPole episode cap
 
@@ -77,14 +75,6 @@ def collect_segment(
     rng: np.random.Generator,
     use_reward_model: RewardModel | None = None,
 ) -> np.ndarray:
-    """
-    Run the agent for exactly `seg_length` steps (resetting mid-segment if
-    the episode ends early) and return the sequence of observations as
-    (seg_length, obs_dim).
-
-    When `use_reward_model` is not None the agent is trained with the model's
-    reward during collection, keeping policy and reward model co-evolving.
-    """
     obs_buf: list[np.ndarray] = []
     obs, _ = env.reset()
     action = agent.begin_episode(obs)
@@ -92,21 +82,14 @@ def collect_segment(
     while len(obs_buf) < seg_length:
         obs_buf.append(obs.copy())
         next_obs, env_reward, terminated, truncated, _ = env.step(action)
-
-        # Reward signal for Q-learning update
-        if use_reward_model is not None:
-            reward = use_reward_model.predict(next_obs)
-        else:
-            reward = env_reward
-
+        reward = use_reward_model.predict(next_obs) if use_reward_model is not None else env_reward
         action = agent.act(next_obs, reward)
         obs = next_obs
-
         if terminated or truncated:
             obs, _ = env.reset()
             action = agent.begin_episode(obs)
 
-    return np.array(obs_buf)   # (seg_length, obs_dim)
+    return np.array(obs_buf)
 
 
 def run_episode(
@@ -114,27 +97,17 @@ def run_episode(
     agent: QLearningAgent,
     reward_model: RewardModel | None = None,
 ) -> int:
-    """
-    Run one full episode.  Returns episode length.
-
-    If `reward_model` is given, uses its predictions as the RL reward
-    (RLHF mode).  Otherwise uses the environment reward directly.
-    """
     obs, _ = env.reset()
     action = agent.begin_episode(obs)
     steps = 0
-
     while True:
         next_obs, env_reward, terminated, truncated, _ = env.step(action)
-
         reward = reward_model.predict(next_obs) if reward_model is not None else env_reward
         action = agent.act(next_obs, reward)
         obs = next_obs
         steps += 1
-
         if terminated or truncated:
             break
-
     return steps
 
 
@@ -143,19 +116,14 @@ def sample_preference_pairs(
     n_pairs: int,
     rng: np.random.Generator,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[float]]:
-    """Sample `n_pairs` random pairs from the buffer, query the oracle."""
     segs_a, segs_b, prefs = [], [], []
     indices = list(range(len(segment_buffer)))
-
     for _ in range(n_pairs):
         i, j = rng.choice(indices, size=2, replace=False)
-        seg_a = segment_buffer[i]
-        seg_b = segment_buffer[j]
-        mu = oracle_preference(seg_a, seg_b, rng)
-        segs_a.append(seg_a)
-        segs_b.append(seg_b)
+        mu = oracle_preference(segment_buffer[i], segment_buffer[j], rng)
+        segs_a.append(segment_buffer[i])
+        segs_b.append(segment_buffer[j])
         prefs.append(mu)
-
     return segs_a, segs_b, prefs
 
 
@@ -163,11 +131,23 @@ def sample_preference_pairs(
 # Main training loop
 # ---------------------------------------------------------------------------
 
-def train() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def train(total_episodes: int, seed: int) -> None:
+    warmup_episodes = max(10, int(total_episodes * WARMUP_FRACTION))
+    remaining       = total_episodes - warmup_episodes
+    num_iterations  = max(1, remaining // EPISODES_PER_ITER)
+    actual_total    = warmup_episodes + num_iterations * EPISODES_PER_ITER
 
-    rng  = np.random.default_rng(SEED)
-    env  = gym.make("CartPole-v1")
+    output_dir = pathlib.Path("experiment-results") / f"ep{total_episodes}" / "rlhf-oracle"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 60)
+    print(f"  RLHF (oracle)  —  {actual_total} episodes  seed={seed}")
+    print(f"  Warm-up: {warmup_episodes} eps  |  Iterations: {num_iterations} × {EPISODES_PER_ITER} eps")
+    print(f"  Output: {output_dir}")
+    print("=" * 60)
+
+    rng = np.random.default_rng(seed)
+    env = gym.make("CartPole-v1")
 
     agent = QLearningAgent(
         learning_rate=AGENT_LR,
@@ -184,123 +164,113 @@ def train() -> None:
         rng=rng,
     )
 
-    segment_buffer: collections.deque[np.ndarray] = collections.deque(
-        maxlen=SEGMENT_BUFFER_SIZE
-    )
-
-    episode_lengths: list[int] = []
+    segment_buffer: collections.deque[np.ndarray] = collections.deque(maxlen=SEGMENT_BUFFER_SIZE)
+    episode_lengths: list[int]  = []
     rm_losses:       list[float] = []
 
     # ------------------------------------------------------------------ #
-    # Phase 1 – Warm-up: train policy on env reward, collect segments     #
+    # Phase 1 — Warm-up                                                    #
     # ------------------------------------------------------------------ #
-    print("=== Phase 1: Warm-up ===")
-    for ep in range(WARMUP_EPISODES):
+    print("\n=== Phase 1: Warm-up ===")
+    for ep in range(warmup_episodes):
         length = run_episode(env, agent, reward_model=None)
         episode_lengths.append(length)
-        if (ep + 1) % 10 == 0:
-            avg = np.mean(episode_lengths[-10:])
-            print(f"  Warmup episode {ep+1:3d}  avg(10)={avg:.1f}")
+        if (ep + 1) % max(1, warmup_episodes // 5) == 0:
+            print(f"  ep {ep+1:4d}  avg(last 10)={np.mean(episode_lengths[-10:]):.1f}")
 
-    # Collect initial segments (policy is somewhat trained now)
-    print(f"\nCollecting {WARMUP_SEGMENTS} warm-up segments …")
+    print(f"\nCollecting {WARMUP_SEGMENTS} warm-up segments…")
     for _ in range(WARMUP_SEGMENTS):
-        seg = collect_segment(env, agent, SEGMENT_LENGTH, rng, use_reward_model=None)
-        segment_buffer.append(seg)
-
-    # Bootstrap reward model
-    print(f"Bootstrapping reward model with {PAIRS_PER_ITER * 2} preference pairs …")
-    for _ in range(2):                         # two rounds before RL kicks in
-        segs_a, segs_b, prefs = sample_preference_pairs(
-            list(segment_buffer), PAIRS_PER_ITER, rng
+        segment_buffer.append(
+            collect_segment(env, agent, SEGMENT_LENGTH, rng, use_reward_model=None)
         )
+
+    print(f"Bootstrapping reward model…")
+    for _ in range(2):
+        segs_a, segs_b, prefs = sample_preference_pairs(list(segment_buffer), PAIRS_PER_ITER, rng)
         for _ in range(REWARD_MODEL_EPOCHS):
             loss = reward_model.train_on_preferences(segs_a, segs_b, prefs)
         rm_losses.append(loss)
-    print(f"  Bootstrap reward-model loss: {loss:.4f}")
+    print(f"  Bootstrap loss: {loss:.4f}")
 
     # ------------------------------------------------------------------ #
-    # Phase 2 – RLHF main loop                                            #
+    # Phase 2 — RLHF loop                                                  #
     # ------------------------------------------------------------------ #
     print("\n=== Phase 2: RLHF loop ===")
-    for iteration in range(1, NUM_ITERATIONS + 1):
-
-        # 2a. Run episodes with reward model as reward signal
+    for iteration in range(1, num_iterations + 1):
         iter_lengths = []
         for _ in range(EPISODES_PER_ITER):
-            length = run_episode(env, agent, reward_model=reward_model)
-            iter_lengths.append(length)
+            iter_lengths.append(run_episode(env, agent, reward_model=reward_model))
         episode_lengths.extend(iter_lengths)
 
-        # 2b. Collect new segments (agent updates inside)
         for _ in range(SEGMENTS_PER_ITER):
-            seg = collect_segment(
-                env, agent, SEGMENT_LENGTH, rng, use_reward_model=reward_model
+            segment_buffer.append(
+                collect_segment(env, agent, SEGMENT_LENGTH, rng, use_reward_model=reward_model)
             )
-            segment_buffer.append(seg)
 
-        # 2c. Sample pairs and query oracle
-        segs_a, segs_b, prefs = sample_preference_pairs(
-            list(segment_buffer), PAIRS_PER_ITER, rng
-        )
-
-        # 2d. Train reward model
+        segs_a, segs_b, prefs = sample_preference_pairs(list(segment_buffer), PAIRS_PER_ITER, rng)
         for _ in range(REWARD_MODEL_EPOCHS):
             loss = reward_model.train_on_preferences(segs_a, segs_b, prefs)
         rm_losses.append(loss)
 
-        avg_len = np.mean(iter_lengths)
-        if iteration % 5 == 0 or iteration == 1:
+        if iteration % max(1, num_iterations // 10) == 0 or iteration == 1:
             print(
-                f"  Iter {iteration:3d}/{NUM_ITERATIONS}"
-                f"  avg_ep_len={avg_len:6.1f}"
+                f"  iter {iteration:4d}/{num_iterations}"
+                f"  avg_ep={np.mean(iter_lengths):6.1f}"
                 f"  rm_loss={loss:.4f}"
-                f"  buffer={len(segment_buffer)}"
             )
 
     env.close()
 
     # ------------------------------------------------------------------ #
-    # Save models                                                          #
+    # Save                                                                 #
     # ------------------------------------------------------------------ #
-    reward_model.save(OUTPUT_DIR / "reward_model.npz")
+    agent.save(output_dir / f"rlhf_oracle_s{seed}_model.npz")
+    reward_model.save(output_dir / f"rlhf_oracle_s{seed}_reward_model.npz")
+    pd.DataFrame({"episode_length": episode_lengths}).to_csv(
+        output_dir / f"rlhf_oracle_s{seed}_history.csv", index_label="episode_index"
+    )
+    print(f"\nSaved to {output_dir}/")
 
     # ------------------------------------------------------------------ #
-    # Plotting                                                             #
+    # Plot                                                                 #
     # ------------------------------------------------------------------ #
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    fig.suptitle("RLHF on CartPole — Christiano et al. (2017)", fontsize=13)
+    fig.suptitle(f"RLHF (oracle) — {actual_total} episodes, seed={seed}", fontsize=13)
 
-    # Episode length curve
     ax = axes[0]
     lengths = np.array(episode_lengths)
-    ax.plot(lengths, alpha=0.35, color="steelblue", label="Episode length")
+    ax.plot(lengths, alpha=0.3, color="tomato")
     window = 20
     if len(lengths) >= window:
         rolling = np.convolve(lengths, np.ones(window) / window, mode="valid")
-        ax.plot(range(window - 1, len(lengths)), rolling, color="steelblue",
+        ax.plot(range(window - 1, len(lengths)), rolling, color="tomato",
                 linewidth=2, label=f"Rolling mean ({window})")
-    ax.axvline(WARMUP_EPISODES, color="orange", linestyle="--", linewidth=1,
+    ax.axvline(warmup_episodes, color="orange", linestyle="--", linewidth=1,
                label="RLHF starts")
-    ax.set_xlabel("Episode")
-    ax.set_ylabel("Length (timesteps)")
-    ax.set_title("Policy performance")
-    ax.legend(fontsize=8)
-    ax.set_ylim(0, MAX_TIMESTEPS + 10)
+    ax.set_xlabel("Episode"); ax.set_ylabel("Length"); ax.set_title("Policy performance")
+    ax.legend(fontsize=8); ax.set_ylim(0, MAX_TIMESTEPS + 10); ax.grid(True, alpha=0.3)
 
-    # Reward model loss curve
     ax = axes[1]
     ax.plot(rm_losses, color="tomato", marker="o", markersize=3)
-    ax.set_xlabel("Reward model update")
-    ax.set_ylabel("Preference cross-entropy loss")
-    ax.set_title("Reward model learning")
+    ax.set_xlabel("Reward model update"); ax.set_ylabel("Preference loss")
+    ax.set_title("Reward model learning"); ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plot_path = OUTPUT_DIR / "rlhf_results.png"
+    plot_path = output_dir / f"rlhf_oracle_s{seed}_results.png"
     plt.savefig(plot_path, dpi=120)
-    print(f"\nPlot saved to {plot_path}")
+    print(f"Plot saved to {plot_path}")
     plt.show()
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser(description="RLHF training with oracle preferences")
+    parser.add_argument("--episodes", type=int, default=100,
+                        help="Total training episodes (default: 100)")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Random seed (default: 0)")
+    args = parser.parse_args()
+    train(args.episodes, args.seed)
