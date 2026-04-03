@@ -46,7 +46,7 @@ from cartpole.reward_model import RewardModel
 
 OUTPUT_DIR = pathlib.Path("experiment-results")
 
-SEED = 42
+SEED = 2
 
 # Segments
 SEGMENT_LENGTH      = 50    # timesteps per clip
@@ -60,8 +60,8 @@ PAIRS_PER_ITER      = 4     # pairs shown each iteration
 REWARD_MODEL_EPOCHS = 50    # gradient steps after each labelling round
 
 # RL
-WARMUP_EPISODES         = 30
-NUM_ITERATIONS          = 20
+WARMUP_EPISODES         = 64
+NUM_ITERATIONS          = 17   # 64 + 17×8 = 200 episodes total
 EPISODES_PER_ITER       = 8
 MAX_TIMESTEPS           = 200
 
@@ -76,7 +76,7 @@ REWARD_MODEL_LR     = 3e-4
 REWARD_MODEL_HIDDEN = 64
 
 # Display
-CLIP_FPS   = 12          # replay speed when showing clips to human
+CLIP_FPS   = 30          # replay speed when showing clips to human
 WIN_W      = 620         # pygame window width
 WIN_H      = 460         # pygame window height  (400 frame + 60 text bar)
 FRAME_W    = 600         # CartPole rgb_array width
@@ -179,9 +179,10 @@ def _play_clip(
     label: str,
     colour: tuple[int, int, int],
     clock: pygame.time.Clock,
+    fps: int = CLIP_FPS,
 ) -> bool:
     """
-    Replay a list of frames at CLIP_FPS.
+    Replay a list of frames at `fps`.
     Returns False if user quit mid-playback.
     """
     for frame in frames:
@@ -190,9 +191,9 @@ def _play_clip(
         screen.fill(COL_BG)
         _blit_frame(screen, frame)
         _overlay_label(screen, font_l, label, colour)
-        _draw_bar(screen, font_s, f"Watching {label}…", colour)
+        _draw_bar(screen, font_s, f"Watching {label}…  ({fps} fps)", colour)
         pygame.display.flip()
-        clock.tick(CLIP_FPS)
+        clock.tick(fps)
     return True
 
 
@@ -209,6 +210,7 @@ def query_human(
     frames_b: list[np.ndarray],
     pair_index: int,
     total_pairs: int,
+    fps: int = CLIP_FPS,
 ) -> float | None:
     """
     Show Clip A then Clip B, then ask the human which was better.
@@ -228,7 +230,7 @@ def query_human(
     pygame.display.flip()
     pygame.time.wait(600)
 
-    if not _play_clip(screen, font_l, font_s, frames_a, "CLIP  A", COL_A, clock):
+    if not _play_clip(screen, font_l, font_s, frames_a, "CLIP  A", COL_A, clock, fps):
         return None
 
     # Brief pause between clips
@@ -244,7 +246,7 @@ def query_human(
     pygame.display.flip()
     pygame.time.wait(600)
 
-    if not _play_clip(screen, font_l, font_s, frames_b, "CLIP  B", COL_B, clock):
+    if not _play_clip(screen, font_l, font_s, frames_b, "CLIP  B", COL_B, clock, fps):
         return None
 
     screen.fill(COL_BG)
@@ -365,6 +367,7 @@ def collect_preferences(
     segment_buffer: list[tuple[np.ndarray, list[np.ndarray]]],
     n_pairs: int,
     rng: np.random.Generator,
+    fps: int = CLIP_FPS,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[float]]:
     """
     Sample `n_pairs` segment pairs, show them to the human, collect labels.
@@ -379,7 +382,7 @@ def collect_preferences(
         obs_b, frames_b = segment_buffer[j]
 
         mu = query_human(screen, font_l, font_s, clock, frames_a, frames_b,
-                         pair_index=k + 1, total_pairs=n_pairs)
+                         pair_index=k + 1, total_pairs=n_pairs, fps=fps)
         if mu is None:          # user quit
             print("  User quit during labelling — stopping early.")
             return segs_a, segs_b, prefs
@@ -504,15 +507,24 @@ def train() -> None:
             iter_lengths.append(length)
         episode_lengths.extend(iter_lengths)
 
+        # Clip length and FPS scale linearly with iteration:
+        #   iter 1  → seg_len=25,  fps=15
+        #   iter 59 → seg_len=100, fps=45
+        progress = (iteration - 1) / max(NUM_ITERATIONS - 1, 1)   # 0.0 → 1.0
+        iter_seg_len = int(25 + 75 * progress)    # 25 → 100
+        iter_fps     = int(15 + 30 * progress)    # 15 → 45
+
         # 3b. Collect new segments
         for _ in range(SEGMENTS_PER_ITER):
-            seg = collect_segment_with_frames(env, agent, SEGMENT_LENGTH, reward_model)
+            seg = collect_segment_with_frames(env, agent, iter_seg_len, reward_model)
             segment_buffer.append(seg)
 
-        # 3c. Human labelling round
+        # 3c. Human labelling round  (pass iter_fps into _play_clip via clock)
+        clock_fps = iter_fps
         segs_a, segs_b, prefs = collect_preferences(
             screen, font_l, font_s, clock,
             list(segment_buffer), PAIRS_PER_ITER, rng,
+            fps=clock_fps,
         )
         human_labels += len(prefs)
 
@@ -530,6 +542,7 @@ def train() -> None:
             f"  avg_ep={avg_len:6.1f}"
             f"  rm_loss={loss:.4f}"
             f"  labels_total={human_labels}"
+            f"  seg_len={iter_seg_len}  fps={iter_fps}"
         )
 
         # User may have quit during labelling (collect_preferences returns early)
@@ -544,6 +557,8 @@ def train() -> None:
     # Save                                                                 #
     # ------------------------------------------------------------------ #
     reward_model.save(OUTPUT_DIR / "reward_model_human.npz")
+    agent.save(OUTPUT_DIR / "rlhf_human_model.npz")
+    print(f"Agent saved to {OUTPUT_DIR / 'rlhf_human_model.npz'}")
 
     # ------------------------------------------------------------------ #
     # Plot                                                                 #

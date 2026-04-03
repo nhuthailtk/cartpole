@@ -77,12 +77,30 @@ def make_label(npz: pathlib.Path) -> str:
     return _NAME_MAP.get(stem, stem.replace("_", " ").title()) + ep_tag
 
 
+_REWARD_MODEL_PATTERNS = re.compile(
+    r"(^|_)(reward_model|hcrl_reward_model)(\.npz)?$", re.IGNORECASE
+)
+
+
+def _is_agent_model(npz: pathlib.Path) -> bool:
+    """Return True only if the .npz file is a QLearningAgent (has q_table key)."""
+    if _REWARD_MODEL_PATTERNS.search(npz.stem):
+        return False
+    try:
+        with np.load(npz) as data:
+            return "q_table" in data
+    except Exception:
+        return False
+
+
 def scan_models() -> list[dict]:
-    """Recursively find all .npz model files and return structured metadata."""
+    """Recursively find all QLearningAgent .npz files and return structured metadata."""
     if not RESULTS_DIR.exists():
         return []
     models = []
     for npz in sorted(RESULTS_DIR.rglob("*.npz")):
+        if not _is_agent_model(npz):
+            continue
         rel = npz.relative_to(RESULTS_DIR)
         ep = next((p for p in rel.parts if re.match(r"ep\d+$", p)), "misc")
         category = npz.parent.name if npz.parent.name != RESULTS_DIR.name else "root"
@@ -128,6 +146,11 @@ def stream_gameplay(model_paths: list[str], num_episodes: int, fps: int):
 
     for path in model_paths:
         p = pathlib.Path(path)
+        if not _is_agent_model(p):
+            raise ValueError(
+                f"{p.name} is not a QLearningAgent model (missing q_table). "
+                "Reward model .npz files cannot be played in the web visualizer."
+            )
         agents.append(QLearningAgent.load(p))
         envs.append(gym.make("CartPole-v1", render_mode="rgb_array", max_episode_steps=500))
         labels.append(make_label(p))
