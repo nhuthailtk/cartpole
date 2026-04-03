@@ -8,7 +8,7 @@ import numpy as np
 
 # Probability of giving feedback at any given timestep.
 # Models human reaction time limitations (Knox & Stone, 2009).
-ORACLE_TRIGGER_PROB: float = 0.6
+ORACLE_TRIGGER_PROB: float = 0.5
 
 
 def oracle_feedback(
@@ -57,8 +57,8 @@ def oracle_feedback(
     angle_stability    = max(0.0, 1.0 - pole_angle / 0.2095)   # limit: ±0.2095 rad
     position_stability = max(0.0, 1.0 - cart_x / 2.4)          # limit: ±2.4
 
-    if angle_stability > 0.6 and position_stability > 0.25:
+    if angle_stability > 0.55 and position_stability > 0.20:
         return weight       # pole < ~5°, cart < ~1.4  → clearly good
-    elif angle_stability < 0.25 or position_stability < 0.1:
+    elif angle_stability < 0.35 or position_stability < 0.25:
         return -weight      # pole > ~8.5° OR cart > ~1.9 → clearly bad
     return 0.0

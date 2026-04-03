@@ -10,6 +10,7 @@ import pygame
 
 from cartpole.agents import Agent, QLearningAgent
 from cartpole.entities import Action, EpisodeHistory, EpisodeHistoryRecord, Observation, Reward
+from cartpole.reward_model import HCRLRewardModel
 
 
 def run_hcrl_agent(
@@ -17,6 +18,7 @@ def run_hcrl_agent(
     env: gym.Env,
     verbose: bool = False,
     feedback_window: tuple[int, int] | None = None,
+    reward_model: HCRLRewardModel | None = None,
 ) -> tuple[EpisodeHistory, list[dict]]:
     """
     Run the agent with Human-in-the-loop reward shaping (TAMER approach).
@@ -76,6 +78,10 @@ def run_hcrl_agent(
     feedback_log: list[dict] = []
     training_start_time = time.time()
 
+    # Reward model: accumulate (obs, reward) pairs for training
+    rm_obs_buf:    list[np.ndarray] = []
+    rm_reward_buf: list[float]      = []
+
     # Initialize pygame to capture keyboard events
     pygame.init()
 
@@ -100,6 +106,9 @@ def run_hcrl_agent(
                             human_reward = 10.0
                             print(f"[HCRL] Positive feedback! Timestep {timestep_index}")
                             episode_feedback_count += 1
+                            if reward_model is not None:
+                                rm_obs_buf.append(observation.copy())
+                                rm_reward_buf.append(human_reward)
                             feedback_log.append({
                                 "timestamp": time.time() - training_start_time,
                                 "episode": episode_index,
@@ -115,6 +124,9 @@ def run_hcrl_agent(
                             human_reward = -10.0
                             print(f"[HCRL] Negative feedback! Timestep {timestep_index}")
                             episode_feedback_count += 1
+                            if reward_model is not None:
+                                rm_obs_buf.append(observation.copy())
+                                rm_reward_buf.append(human_reward)
                             feedback_log.append({
                                 "timestamp": time.time() - training_start_time,
                                 "episode": episode_index,
@@ -136,12 +148,18 @@ def run_hcrl_agent(
                 # Step the environment
                 observation, step_reward, terminated, _, _ = env.step(action)
 
-                # Penalize early termination, preserve human signal
+                # Reward model fills in signal when human is silent
+                if reward_model is not None and human_reward == 0.0:
+                    shaped_reward = reward_model.predict(observation)
+                else:
+                    shaped_reward = human_reward
+
+                # Penalize early termination, preserve shaped signal
                 is_successful = timestep_index >= max_timesteps_per_episode - 1
                 if terminated and not is_successful:
-                    total_reward: Reward = float(-terminate_penalty) + human_reward
+                    total_reward: Reward = float(-terminate_penalty) + shaped_reward
                 else:
-                    total_reward = float(step_reward) + human_reward
+                    total_reward = float(step_reward) + shaped_reward
                 if human_reward != 0:
                     print(f"Total reward: {total_reward}")
 
@@ -172,9 +190,16 @@ def run_hcrl_agent(
                     if verbose and episode_history_plotter:
                         episode_history_plotter.update_plot()
 
+                    # Retrain reward model on all collected feedback so far
+                    if reward_model is not None and len(rm_obs_buf) >= 2:
+                        obs_arr = np.array(rm_obs_buf)
+                        rew_arr = np.array(rm_reward_buf)
+                        loss = reward_model.train_on_feedback(obs_arr, rew_arr)
+                        print(f"  [RewardModel] trained on {len(rm_obs_buf)} samples, loss={loss:.4f}")
+
                     if episode_history.is_goal_reached():
                         print(f"SUCCESS: Goal reached after {episode_index + 1} episodes!")
-                        return episode_history
+                        return episode_history, feedback_log
             
                     break
 
@@ -226,10 +251,15 @@ def main() -> None:
         random_state=random_state,
     )
 
-    episode_history, feedback_log = run_hcrl_agent(agent=agent, env=env, verbose=verbose)
+    reward_model = HCRLRewardModel(obs_dim=4, hidden_dim=64, lr=1e-3)
+
+    episode_history, feedback_log = run_hcrl_agent(
+        agent=agent, env=env, verbose=verbose, reward_model=reward_model
+    )
     save_history(episode_history, experiment_dir="experiment-results")
     save_feedback_log(feedback_log, experiment_dir="experiment-results")
     agent.save("experiment-results/hcrl_model.npz")
+    reward_model.save("experiment-results/hcrl_reward_model.npz")
 
 
 if __name__ == "__main__":
