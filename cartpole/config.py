@@ -114,9 +114,6 @@ ORACLE_BAD_POS_STAB:    float = 0.25   # pos_stab below this → clearly bad
 
 SEEDS: list[int] = [0, 1, 2]
 
-# Feedback magnitude sensitivity study  [HCRL §III-B inspired]
-SENSITIVITY_WEIGHTS: list[float] = [5.0, 20.0, 50.0]
-
 # Feedback timing conditions (as fractions of total episodes)  [HCRL §IV]
 TIMING_CONDITIONS: dict[str, tuple[float, float]] = {
     "early":         (0.00, 0.20),

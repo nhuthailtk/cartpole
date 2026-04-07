@@ -21,13 +21,6 @@ Examples:
         experiment-results/ep200/timing-experiment/mid_model.npz \\
         experiment-results/ep200/timing-experiment/late_model.npz \\
         --labels Baseline "Early (0-20%)" "Mid (40-60%)" "Late (80-100%)"
-
-    # Compare sensitivity models
-    uv run python visual_compare.py \\
-        experiment-results/ep200/sensitivity/w1_s0_model.npz \\
-        experiment-results/ep200/sensitivity/w5_s0_model.npz \\
-        experiment-results/ep200/sensitivity/w10_s0_model.npz \\
-        --labels "Weight=1" "Weight=5" "Weight=10" --episodes 5
 """
 
 import argparse

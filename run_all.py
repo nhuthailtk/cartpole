@@ -12,9 +12,8 @@ Usage:
 Steps:
     1. Baseline training          (pure Q-Learning + reward shaping)
     2. HCRL timing experiment     (3 conditions: Early / Mid / Late, oracle)
-    3. Sensitivity analysis       (feedback weights 1/5/10/20/50, oracle)
-    4. Compare models             (training curves + gameplay stats)
-    5. Convergence analysis       (threshold crossing speeds)
+    3. Compare models             (training curves + gameplay stats)
+    4. Convergence analysis       (threshold crossing speeds)
 """
 
 import argparse
@@ -73,36 +72,31 @@ def main():
         # Step 1: Baseline
         run(
             ["run.py", "--episodes", str(ep)],
-            f"[1/5] Baseline Training ({ep} episodes)",
+            f"[1/4] Baseline Training ({ep} episodes)",
         )
 
         # Step 2: HCRL Timing Experiment (oracle, automated)
         run(
             ["feedback_timing_experiment.py", "--auto", "--episodes", str(ep)] + charts_flag,
-            f"[2/5] HCRL Timing Experiment — Early / Mid / Late (oracle, {ep} episodes)",
+            f"[2/4] HCRL Timing Experiment — Early / Mid / Late (oracle, {ep} episodes)",
         )
 
-        # Step 3: Sensitivity Analysis (oracle, automated)
-        run(
-            ["sensitivity_analysis.py", "--episodes", str(ep)] + charts_flag,
-            f"[3/5] Feedback Weight Sensitivity Analysis (oracle, {ep} episodes)",
-        )
     else:
         print("\n[Skipping training steps — analyze-only mode]")
 
     if args.skip_charts:
         print("\n[Skipping chart steps — --skip-charts mode]")
     else:
-        # Step 4: Compare Models
+        # Step 3: Compare Models
         run(
             ["compare_models.py", "--episodes", str(ep), "--eval-episodes", str(eval_ep)],
-            f"[4/5] Compare Models ({eval_ep} eval episodes each)",
+            f"[3/4] Compare Models ({eval_ep} eval episodes each)",
         )
 
-        # Step 5: Convergence Analysis
+        # Step 4: Convergence Analysis
         run(
             ["convergence_analysis.py", "--episodes", str(ep)],
-            "[5/5] Convergence Speed Analysis",
+            "[4/4] Convergence Speed Analysis",
         )
 
     print(f"\n{'#' * 60}")

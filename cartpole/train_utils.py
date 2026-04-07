@@ -3,7 +3,7 @@ Shared training utilities for all CartPole experiments.
 
 Functions here eliminate the duplicate training-loop implementations that
 previously existed across train_hcrl.py, train_vi_tamer.py,
-feedback_timing_experiment.py, and sensitivity_analysis.py.
+and feedback_timing_experiment.py.
 
 Also provides shared IO helpers (save_history_csv, save_feedback_csv) that
 replaced identical copies scattered across training and analysis scripts.

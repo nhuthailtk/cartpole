@@ -1,7 +1,7 @@
 """
 Oracle (simulated human) feedback for HCRL experiments.
 
-Shared by feedback_timing_experiment.py and sensitivity_analysis.py.
+Shared by feedback_timing_experiment.py and training scripts.
 """
 
 import numpy as np

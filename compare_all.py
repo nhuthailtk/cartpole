@@ -38,14 +38,11 @@ SEEDS = cfg.SEEDS
 # Model registry — all methods
 # ---------------------------------------------------------------------------
 
-SENSITIVITY_WEIGHTS = [int(w) for w in cfg.SENSITIVITY_WEIGHTS]
-SENSITIVITY_COLORS  = {5: "gold", 20: "darkorange", 50: "saddlebrown"}
 
 
 def get_all_models(episodes: int, seed: int) -> list[dict]:
     base         = OUTPUT_DIR / f"ep{episodes}"
     timing       = base / "timing-experiment"
-    sensitivity  = base / "sensitivity"
     oracle       = base / "rlhf-oracle"
     human        = base / "rlhf-human"
     hcrl_oracle  = base / "hcrl-oracle"
@@ -109,21 +106,6 @@ def get_all_models(episodes: int, seed: int) -> list[dict]:
             "prefix":      "full_feedback",
             "seed":        seed,
         },
-        # ── HCRL sensitivity (weight variants) ───────────────────────────
-        *[
-            {
-                "key":         f"sensitivity_w{w}",
-                "label":       f"HCRL Sensitivity w={w}",
-                "color":       SENSITIVITY_COLORS[w],
-                "linestyle":   ":",
-                "group":       "Sensitivity",
-                "model_path":  sensitivity / f"w{w}_s{seed}_model.npz",
-                "history_dir": sensitivity,
-                "prefix":      f"w{w}_s{seed}",
-                "seed":        seed,
-            }
-            for w in SENSITIVITY_WEIGHTS
-        ],
         # ── RLHF ──────────────────────────────────────────────────────────
         {
             "key":         "rlhf_oracle",
@@ -183,8 +165,6 @@ def _load_histories(m: dict) -> list[pd.DataFrame]:
     candidates = [
         pathlib.Path(m["history_dir"]) / f"{m['prefix']}_history.csv",
         pathlib.Path(m["history_dir"]) / f"{m['prefix']}_s{seed}_history.csv",
-        # sensitivity_analysis.py saves as w{w}_s{seed}.csv (no _history suffix)
-        pathlib.Path(m["history_dir"]) / f"{m['prefix']}.csv",
         # Fallback: old canonical single-seed files
         pathlib.Path(m["history_dir"]) / f"{m['prefix']}_episode_history.csv",
         pathlib.Path(m["history_dir"]) / "episode_history.csv",
@@ -234,8 +214,8 @@ def plot_training(models: list[dict], episodes: int) -> None:
     ax_grp = axes[1]
     ax_grp.set_title("By paradigm (mean across conditions)")
 
-    group_curves: dict[str, list[np.ndarray]] = {"Baseline": [], "HCRL": [], "Sensitivity": [], "RLHF": []}
-    group_colors  = {"Baseline": "steelblue", "HCRL": "darkorange", "Sensitivity": "goldenrod", "RLHF": "mediumseagreen"}
+    group_curves: dict[str, list[np.ndarray]] = {"Baseline": [], "HCRL": [], "RLHF": []}
+    group_colors  = {"Baseline": "steelblue", "HCRL": "darkorange", "RLHF": "mediumseagreen"}
 
     any_plotted = False
     for m in models:
@@ -468,7 +448,7 @@ def main() -> None:
     models = get_all_models(args.episodes, args.seed)
 
     print("=" * 70)
-    print(f"  FULL COMPARISON: Baseline | HCRL ×4 | Sensitivity ×3 | RLHF ×2")
+    print(f"  FULL COMPARISON: Baseline | HCRL ×4 | RLHF ×2")
     print(f"  episodes={args.episodes}  seed={args.seed}  eval={args.eval_episodes}")
     print("=" * 70)
 

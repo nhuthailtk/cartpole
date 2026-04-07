@@ -152,7 +152,6 @@ ML-Project/
 ├── train_rlhf_human.py             # RLHF — real human (pygame clip comparison)
 │
 ├── feedback_timing_experiment.py   # When is feedback most effective? (4 conditions)
-├── sensitivity_analysis.py         # Feedback magnitude study (weights 5/20/50)
 ├── run_all.py                      # Full automated pipeline orchestrator
 │
 ├── compare_all.py                  # Big-picture comparison of all methods
@@ -184,7 +183,6 @@ ML-Project/
         ├── rlhf-oracle/
         ├── rlhf-ensemble/
         ├── timing-experiment/
-        └── sensitivity/
 ```
 
 ---
@@ -230,10 +228,7 @@ uv run python train_rlhf_ensemble.py --episodes 200 --seed 0
 # 6. Timing experiment  (when is feedback most effective?)
 uv run python feedback_timing_experiment.py --auto --episodes 200
 
-# 7. Sensitivity analysis  (how does feedback magnitude matter?)
-uv run python sensitivity_analysis.py --episodes 200
-
-# 8. Full pipeline (runs steps 1, 6, 7, then analysis)
+# 7. Full pipeline (runs steps 1, 6, then analysis)
 uv run python run_all.py --episodes 200
 ```
 
@@ -268,7 +263,6 @@ uv run python train_rlhf_human.py
 | Script | Research Question |
 |--------|------------------|
 | `feedback_timing_experiment.py` | When is feedback most effective? (Early 0-20% / Mid 40-60% / Late 80-100% / Full) |
-| `sensitivity_analysis.py` | How does feedback magnitude affect learning? (weights 5/20/50) |
 | `run_all.py` | Full automated pipeline orchestrator |
 
 ### Analysis Scripts
@@ -355,7 +349,6 @@ All constants live in **`cartpole/config.py`** — one file to change them all.
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `SEEDS` | [0, 1, 2] | Random seeds for statistical validity |
-| `SENSITIVITY_WEIGHTS` | [5, 20, 50] | Feedback magnitudes tested |
 | `TIMING_CONDITIONS` | early/mid/late/full | Feedback window fractions |
 
 ---
@@ -397,11 +390,6 @@ experiment-results/
     │   ├── early_s0_history.csv
     │   ├── early_s0_feedback_log.csv
     │   └── ... (mid, late, full_feedback)
-    │
-    └── sensitivity/                # Weights [5, 20, 50] × 3 seeds
-        ├── w5_s0_model.npz
-        ├── w5_s0_history.csv
-        └── ...
 ```
 
 ---

@@ -62,7 +62,6 @@ The survey also introduces **VI-TAMER** (Knox & Stone, 2012), the non-myopic ext
 | Survey RQ | This Project's Experimental Condition |
 |---|---|
 | When during training is human feedback most effective? | Feedback timing experiment (early / mid / late / full) |
-| How sensitive is learning to feedback magnitude? | Sensitivity analysis ($w \in \{5, 20, 50\}$) |
 | Does non-myopic credit assignment improve performance? | TAMER vs. VI-TAMER comparison |
 
 ### 1.3 Paper 2 — Deep Reinforcement Learning from Human Preferences (Christiano et al., 2017)
@@ -221,7 +220,7 @@ The project was developed in four stages:
 
 **Stage 1 — Baseline**: Implement a tabular Q-Learning agent with environment reward as the sole training signal. Establish the performance ceiling that human-feedback methods must match or exceed.
 
-**Stage 2 — HCRL (Paper 1)**: Implement TAMER and VI-TAMER with a simulated oracle. Run the feedback timing experiment (early / mid / late / full) and the feedback magnitude sensitivity analysis.
+**Stage 2 — HCRL (Paper 1)**: Implement TAMER and VI-TAMER with a simulated oracle. Run the feedback timing experiment (early / mid / late / full).
 
 **Stage 3 — RLHF (Paper 2)**: Implement the single-model RLHF pipeline (§2.1) and the full §2.2 ensemble variant with uncertainty-based queries, reward normalisation, and human-error modelling.
 
@@ -259,7 +258,6 @@ ML-Project/
 ├── train_rlhf.py            # RLHF single model + --human flag
 ├── train_rlhf_ensemble.py   # RLHF ensemble (§2.2) + --human flag
 ├── feedback_timing_experiment.py
-├── sensitivity_analysis.py
 ├── compare_models.py
 ├── compare_all.py
 └── webapp.py                # Flask browser visualiser
@@ -366,7 +364,7 @@ Eliminates duplicated training loops across seven scripts:
 
 | Function | Used by |
 |---|---|
-| `run_hcrl_episode(env, agent, model, rng, ...)` | `train_hcrl.py`, `feedback_timing_experiment.py`, `sensitivity_analysis.py` |
+| `run_hcrl_episode(env, agent, model, rng, ...)` | `train_hcrl.py`, `feedback_timing_experiment.py` |
 | `run_vi_tamer_episode(env, agent, model, rng, ...)` | `train_vi_tamer.py` |
 | `run_rl_episode(env, agent, model, ...)` | `train_rlhf.py`, `train_rlhf_ensemble.py` |
 | `collect_segment(env, agent, rng, model, ...)` | Both RLHF scripts |
@@ -438,15 +436,7 @@ Runs four oracle-HCRL conditions with feedback restricted to different training 
 python feedback_timing_experiment.py --episodes 100
 ```
 
-### 5.5 Sensitivity Analysis (Paper 1, §III-B)
-
-Trains oracle-HCRL with feedback magnitudes $w \in \{5, 20, 50\}$ (in addition to default $w = 10$) over 3 seeds. *Not yet executed — see §6.5 for details.*
-
-```bash
-python sensitivity_analysis.py --episodes 100
-```
-
-### 5.6 RLHF — Single Model (Paper 2, §2.1)
+### 5.5 RLHF — Single Model (Paper 2, §2.1)
 
 Pipeline: 20 warm-up episodes → bootstrap (24 clip pairs, 40 gradient steps) → 10 RLHF iterations (8 episodes, 8 segments, 24 preference queries, 40 gradient steps each).
 
@@ -455,16 +445,16 @@ python train_rlhf.py --episodes 100 --seed {0,1,2}            # oracle
 python train_rlhf.py --human --episodes 100 --seed 0           # interactive
 ```
 
-### 5.7 RLHF — Ensemble (Paper 2, §2.2)
+### 5.6 RLHF — Ensemble (Paper 2, §2.2)
 
-Identical to §5.6 but with $K = 3$ bootstrapped reward models, uncertainty-based query selection ($10 \times 24 = 240$ candidates → 24 most uncertain), Welford reward normalisation, and 10% oracle error rate.
+Identical to §5.5 but with $K = 3$ bootstrapped reward models, uncertainty-based query selection ($10 \times 24 = 240$ candidates → 24 most uncertain), Welford reward normalisation, and 10% oracle error rate.
 
 ```bash
 python train_rlhf_ensemble.py --episodes 100 --seed {0,1,2} --n-models 3  # oracle
 python train_rlhf_ensemble.py --human --episodes 100 --seed 0              # interactive
 ```
 
-### 5.8 Generating Comparison Plots
+### 5.7 Generating Comparison Plots
 
 After all methods are trained:
 
@@ -475,7 +465,7 @@ python compare_all.py --episodes 100
 
 These produce box plots, bar charts, histograms, and statistical tables (Welch's $t$-test, Cohen's $d$).
 
-### 5.9 Output Directory Summary
+### 5.8 Output Directory Summary
 
 | Method | Output directory |
 |---|---|
@@ -483,7 +473,6 @@ These produce box plots, bar charts, histograms, and statistical tables (Welch's
 | HCRL / TAMER | `experiment-results/ep100/hcrl-oracle/` |
 | VI-TAMER | `experiment-results/ep100/vi-tamer/` |
 | Timing Experiment | `experiment-results/ep100/timing-experiment/` |
-| Sensitivity Analysis | `experiment-results/ep100/sensitivity/` |
 | RLHF Single | `experiment-results/ep100/rlhf-oracle/` |
 | RLHF Ensemble | `experiment-results/ep100/rlhf-ensemble/` |
 
@@ -653,16 +642,6 @@ Mid and late feedback produce statistically significant improvements over the ba
 **RLHF (single model)**: The training curve is flat for seeds 0–1 (iteration avg stays at 30–45 throughout all 10 iterations) and weakly ascending for seed 2. The **reward model loss does not show a clear downward trend**, oscillating between 0.22 and 0.67 across iterations. This is the signature of an underdetermined regression problem: 288 preference labels in a 4-dimensional continuous state space with a 2-layer MLP is insufficient for robust convergence at this training scale.
 
 **RLHF Ensemble**: Seed-to-seed behaviour is the most divergent of all methods. Seed 1 becomes permanently stuck at ~10 steps from iteration 6 onward, while seed 2 improves steadily. The stuck behaviour is consistent with a degenerate ensemble state: if the bootstrapped training data for each of the $K=3$ sub-models happens to emphasise the same poor-quality early preferences (the random 10% error rate affects ~29 labels), all models may converge to a similarly incorrect reward surface, and the uncertainty-based query selection becomes ineffective because the models agree — but on the wrong answer.
-
-### 6.5 Sensitivity Analysis (Feedback Magnitude)
-
-The sensitivity analysis described in §5.5 ($w \in \{5, 20, 50\}$) was not executed in this experimental round due to time constraints. The feedback timing experiment and multi-method comparison were prioritised, as they address the higher-impact research questions from the survey (§1.2). The infrastructure for the sensitivity experiment is fully implemented in `sensitivity_analysis.py` and can be run with `python sensitivity_analysis.py --episodes 100`. Based on the theoretical framework, the expected results are:
-
-- **Low magnitude ($w = 5$)**: Weaker reward model signal relative to environment reward; slower reward model convergence but potentially less interference with the Q-table's own learning.
-- **High magnitude ($w = 50$)**: Stronger reward model signal; faster initial shaping but risk of overshoot if the reward model is poorly calibrated in early episodes.
-- **Default ($w = 10$)**: The current experimental baseline, which already exhibits the cold-start and timing-sensitivity effects described above.
-
-This analysis remains as future work and is noted in §9.3.
 
 ---
 
@@ -973,8 +952,6 @@ The simulated oracle in this project is near-optimal: it scores states based on 
 - **Single environment**: CartPole is a solved problem. More informative comparisons would require tasks where the environment reward is genuinely unavailable or misspecified.
 
 - **Oracle ideality**: The simulated oracle scores based on perfect state knowledge. A study with real human participants would quantify the performance gap introduced by human error, fatigue, and individual variation.
-
-- **Feedback magnitude sensitivity not yet evaluated**: The sensitivity analysis ($w \in \{5, 20, 50\}$) described in §5.5 was not executed due to time constraints (see §6.5). Running this experiment would quantify how robust HCRL is to the choice of feedback weight — a critical parameter for real-world deployment where the appropriate magnitude is unknown a priori.
 
 - **Adaptive feedback timing**: The timing experiment results suggest that a system that dynamically decides *when* to request feedback (based on the agent's learning state) could outperform any fixed window. This connects to the active learning literature.
 
