@@ -26,18 +26,19 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from scipy import stats
 
+from cartpole import config as cfg
 from cartpole.agents import QLearningAgent
 
 OUTPUT_DIR = pathlib.Path("experiment-results")
 
-SEEDS = [0, 1, 2]
+SEEDS = cfg.SEEDS
 
 
 # ---------------------------------------------------------------------------
 # Model registry — all methods
 # ---------------------------------------------------------------------------
 
-SENSITIVITY_WEIGHTS = [5, 20, 50]
+SENSITIVITY_WEIGHTS = [int(w) for w in cfg.SENSITIVITY_WEIGHTS]
 SENSITIVITY_COLORS  = {5: "gold", 20: "darkorange", 50: "saddlebrown"}
 
 

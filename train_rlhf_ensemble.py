@@ -1,23 +1,23 @@
 """
-RLHF training — Christiano et al. (2017).
+RLHF training with Ensemble Reward Model — Christiano et al. (2017) §2.2.
 
-"Deep Reinforcement Learning from Human Preferences"
-Christiano, Leike, Brown, Martic, Legg, Amodei (NeurIPS 2017)
+Adds all §2.2 algorithmic improvements over the baseline train_rlhf.py:
 
-Baseline RLHF with a single reward model (§2.1).
-For §2.2 improvements (ensemble, uncertainty queries, normalisation) see
-train_rlhf_ensemble.py.
+  1. Ensemble (K=3 models, bootstrapped training)          §2.2 bullet 1
+  2. Uncertainty-based query selection (highest variance)  §2.2.4
+  3. Reward normalisation (zero mean / unit std)           §2.2.1
+  4. Oracle human-error noise (10% random responses)       §2.2.3
 
 Two feedback modes:
-  oracle (default) — simulated Boltzmann-rational oracle scores clip pairs.
-  human  (--human) — real human watches clips and presses A/B/S to label.
+  oracle (default) — simulated oracle with Boltzmann + 10% error noise.
+  human  (--human) — real human watches the most uncertain clip pairs.
 
 Usage
 -----
-    uv run python train_rlhf.py                          # oracle (automated)
-    uv run python train_rlhf.py --human                  # real human labels
-    uv run python train_rlhf.py --episodes 200 --seed 0
-    uv run python train_rlhf.py --human --episodes 100 --seed 0
+    uv run python train_rlhf_ensemble.py                         # oracle
+    uv run python train_rlhf_ensemble.py --human                 # real human
+    uv run python train_rlhf_ensemble.py --episodes 200 --seed 0 --n-models 3
+    uv run python train_rlhf_ensemble.py --human --episodes 100 --seed 0
 
 Controls (--human mode)
 -----------------------
@@ -40,12 +40,11 @@ import numpy as np
 import pygame
 
 from cartpole import config as cfg
-from cartpole.reward_model import RewardModel
+from cartpole.reward_model import EnsembleRewardModel, oracle_preference
 from cartpole.train_utils import (
     collect_segment,
     make_agent,
     run_rl_episode,
-    sample_preference_pairs,
     save_history_csv,
 )
 
@@ -73,7 +72,7 @@ _COL_YELLOW = (255, 220,  60)
 
 def _init_pygame():
     pygame.init()
-    pygame.display.set_caption("RLHF — Human Preference Labelling")
+    pygame.display.set_caption("RLHF Ensemble — Human Preference Labelling")
     screen = pygame.display.set_mode((_WIN_W, _WIN_H))
     font_l = pygame.font.SysFont("Arial", 28, bold=True)
     font_s = pygame.font.SysFont("Arial", 18)
@@ -169,7 +168,6 @@ def _query_human(screen, font_l, font_s, clock, frames_a, frames_b,
     if not _wait_for_keypress(screen, font_s):
         return None
 
-    # Show thumbnails and wait for A / B / S
     prompt = "Which was better?   [A]  Clip A     [B]  Clip B     [S]  Skip"
     screen.fill(_COL_BG)
     th_w, th_h = _FRAME_W // 2 - 10, _FRAME_H // 2
@@ -207,7 +205,7 @@ def _collect_segment_with_frames(
     env: gym.Env,
     agent,
     seg_length: int,
-    reward_model=None,
+    ensemble=None,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
     obs_list, frames = [], []
     obs, _ = env.reset()
@@ -217,7 +215,10 @@ def _collect_segment_with_frames(
         obs_list.append(obs.copy())
         frames.append(frame)
         next_obs, env_reward, terminated, truncated, _ = env.step(action)
-        reward = reward_model.predict(next_obs) if reward_model is not None else float(env_reward)
+        if ensemble is not None:
+            reward = ensemble.predict_normalised(next_obs)
+        else:
+            reward = float(env_reward)
         action = agent.act(next_obs, reward)
         obs = next_obs
         if terminated or truncated:
@@ -226,13 +227,34 @@ def _collect_segment_with_frames(
     return np.array(obs_list), frames
 
 
-def _collect_human_preferences(screen, font_l, font_s, clock, seg_buf, n_pairs, rng, fps=_CLIP_FPS):
+def _collect_human_preferences_uncertain(
+    screen, font_l, font_s, clock,
+    seg_buf_with_frames: list[tuple[np.ndarray, list]],
+    ensemble: EnsembleRewardModel,
+    n_pairs: int,
+    rng: np.random.Generator,
+    fps: int = _CLIP_FPS,
+):
+    """
+    Select the most uncertain pairs (§2.2.4) and show them to the human.
+    Returns (segs_a, segs_b, prefs) same as oracle version.
+    """
+    # Extract obs arrays for uncertainty selection
+    obs_segs = [obs for obs, _ in seg_buf_with_frames]
+    n_cand = n_pairs * cfg.ENSEMBLE_CANDIDATES_MULT
+    selected_a, selected_b, _ = ensemble.select_uncertain_pairs(
+        obs_segs, n_pairs, n_candidates=n_cand, rng=rng
+    )
+
+    # Map selected obs arrays back to (obs, frames) pairs
+    obs_to_frames = {id(obs): frames for obs, frames in seg_buf_with_frames}
+
     segs_a, segs_b, prefs = [], [], []
-    indices = list(range(len(seg_buf)))
-    for k in range(n_pairs):
-        i, j = rng.choice(indices, size=2, replace=False)
-        obs_a, frames_a = seg_buf[i]
-        obs_b, frames_b = seg_buf[j]
+    for k, (obs_a, obs_b) in enumerate(zip(selected_a, selected_b)):
+        # Find matching frames — fall back to first entry if id lookup fails
+        frames_a = obs_to_frames.get(id(obs_a), seg_buf_with_frames[0][1])
+        frames_b = obs_to_frames.get(id(obs_b), seg_buf_with_frames[1][1])
+
         mu = _query_human(screen, font_l, font_s, clock, frames_a, frames_b,
                           pair_index=k + 1, total_pairs=n_pairs, fps=fps)
         if mu is None:
@@ -241,6 +263,7 @@ def _collect_human_preferences(screen, font_l, font_s, clock, seg_buf, n_pairs, 
         segs_a.append(obs_a)
         segs_b.append(obs_b)
         prefs.append(mu)
+
     return segs_a, segs_b, prefs
 
 
@@ -248,29 +271,36 @@ def _collect_human_preferences(screen, font_l, font_s, clock, seg_buf, n_pairs, 
 # Oracle training (automated)
 # ---------------------------------------------------------------------------
 
-def train(total_episodes: int, seed: int) -> None:
+def train(total_episodes: int, seed: int, n_models: int) -> None:
     warmup_eps   = max(10, int(total_episodes * cfg.RLHF_WARMUP_FRACTION))
     remaining    = total_episodes - warmup_eps
     num_iter     = max(1, remaining // cfg.RLHF_EPISODES_PER_ITER)
     actual_total = warmup_eps + num_iter * cfg.RLHF_EPISODES_PER_ITER
 
-    out = pathlib.Path(cfg.experiment_dir(total_episodes, "rlhf-oracle"))
+    out = pathlib.Path(cfg.experiment_dir(total_episodes, "rlhf-ensemble"))
     out.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
-    print(f"  RLHF (oracle)  —  {actual_total} episodes  seed={seed}")
+    print(f"  RLHF + Ensemble  —  {actual_total} episodes  seed={seed}")
+    print(f"  Ensemble size     : K={n_models}")
+    print(f"  Oracle error prob : {cfg.ENSEMBLE_ERROR_PROB}  (human noise §2.2.3)")
+    print(f"  Query selection   : uncertainty-based ({cfg.ENSEMBLE_CANDIDATES_MULT}× candidates §2.2.4)")
+    print(f"  Reward            : normalised (zero mean / unit std §2.2.1)")
     print(f"  Warm-up: {warmup_eps} eps  |  Iterations: {num_iter} × {cfg.RLHF_EPISODES_PER_ITER} eps")
     print(f"  Output: {out}")
     print("=" * 60)
 
-    rng   = np.random.default_rng(seed)
-    env   = gym.make("CartPole-v1")
-    agent = make_agent(rng)
-    reward_model = RewardModel(obs_dim=env.observation_space.shape[0], rng=rng)
+    rng      = np.random.default_rng(seed)
+    env      = gym.make("CartPole-v1")
+    agent    = make_agent(rng)
+    ensemble = EnsembleRewardModel(
+        n_models=n_models, obs_dim=env.observation_space.shape[0], rng=rng
+    )
 
     seg_buf: collections.deque[np.ndarray] = collections.deque(maxlen=cfg.RLHF_SEGMENT_BUFFER)
     episode_lengths: list[int]   = []
     rm_losses:       list[float] = []
+    total_queries    = 0
 
     print("\n=== Phase 1: Warm-up ===")
     for ep in range(warmup_eps):
@@ -282,62 +312,86 @@ def train(total_episodes: int, seed: int) -> None:
     for _ in range(cfg.RLHF_WARMUP_SEGMENTS):
         seg_buf.append(collect_segment(env, agent, rng))
 
-    print("Bootstrapping reward model…")
+    print("Bootstrapping ensemble reward model…")
     for _ in range(2):
-        segs_a, segs_b, prefs = sample_preference_pairs(list(seg_buf), cfg.RLHF_PAIRS_PER_ITER, rng)
+        n_cand = cfg.RLHF_PAIRS_PER_ITER * cfg.ENSEMBLE_CANDIDATES_MULT
+        segs_a, segs_b, _ = ensemble.select_uncertain_pairs(
+            list(seg_buf), cfg.RLHF_PAIRS_PER_ITER, n_candidates=n_cand, rng=rng
+        )
+        prefs = [
+            oracle_preference(a, b, rng, error_prob=cfg.ENSEMBLE_ERROR_PROB)
+            for a, b in zip(segs_a, segs_b)
+        ]
+        total_queries += len(prefs)
         for _ in range(cfg.RLHF_RM_EPOCHS):
-            loss = reward_model.train_on_preferences(segs_a, segs_b, prefs)
+            loss = ensemble.train_on_preferences(segs_a, segs_b, prefs)
         rm_losses.append(loss)
-    print(f"  Bootstrap loss: {loss:.4f}")
+    print(f"  Bootstrap loss: {loss:.4f}  |  queries: {total_queries}")
 
-    print("\n=== Phase 2: RLHF loop ===")
+    print("\n=== Phase 2: RLHF loop (ensemble + uncertainty queries) ===")
     for it in range(1, num_iter + 1):
         iter_lengths = [
-            run_rl_episode(env, agent, reward_model)
+            run_rl_episode(env, agent, ensemble, normalise=True)
             for _ in range(cfg.RLHF_EPISODES_PER_ITER)
         ]
         episode_lengths.extend(iter_lengths)
 
         for _ in range(cfg.RLHF_SEGMENTS_PER_ITER):
-            seg_buf.append(collect_segment(env, agent, rng, reward_model))
+            seg_buf.append(collect_segment(env, agent, rng, ensemble, normalise=True))
 
-        segs_a, segs_b, prefs = sample_preference_pairs(list(seg_buf), cfg.RLHF_PAIRS_PER_ITER, rng)
+        n_cand = cfg.RLHF_PAIRS_PER_ITER * cfg.ENSEMBLE_CANDIDATES_MULT
+        segs_a, segs_b, _ = ensemble.select_uncertain_pairs(
+            list(seg_buf), cfg.RLHF_PAIRS_PER_ITER, n_candidates=n_cand, rng=rng
+        )
+        prefs = [
+            oracle_preference(a, b, rng, error_prob=cfg.ENSEMBLE_ERROR_PROB)
+            for a, b in zip(segs_a, segs_b)
+        ]
+        total_queries += len(prefs)
+
         for _ in range(cfg.RLHF_RM_EPOCHS):
-            loss = reward_model.train_on_preferences(segs_a, segs_b, prefs)
+            loss = ensemble.train_on_preferences(segs_a, segs_b, prefs)
         rm_losses.append(loss)
 
         if it % max(1, num_iter // 10) == 0 or it == 1:
             print(f"  iter {it:4d}/{num_iter}"
                   f"  avg_ep={np.mean(iter_lengths):6.1f}"
-                  f"  rm_loss={loss:.4f}")
+                  f"  rm_loss={loss:.4f}"
+                  f"  queries={total_queries}")
 
     env.close()
 
-    agent.save(out / f"rlhf_oracle_s{seed}_model.npz")
-    reward_model.save(out / f"rlhf_oracle_s{seed}_reward_model.npz")
-    save_history_csv(episode_lengths, out / f"rlhf_oracle_s{seed}_history.csv")
-    print(f"\nSaved to {out}/")
+    agent.save(out / f"rlhf_ensemble_s{seed}_model.npz")
+    ensemble.save(out, prefix=f"rlhf_ensemble_s{seed}")
+    save_history_csv(episode_lengths, out / f"rlhf_ensemble_s{seed}_history.csv")
+    print(f"\nSaved to {out}/  |  Total oracle queries: {total_queries}")
 
-    _plot(episode_lengths, rm_losses, warmup_eps,
-          f"RLHF (oracle) — {actual_total} eps, seed={seed}",
-          "tomato", out / f"rlhf_oracle_s{seed}_results.png")
+    _plot(episode_lengths, rm_losses, warmup_eps, n_models, total_queries,
+          f"RLHF Ensemble (K={n_models}) — {actual_total} eps, seed={seed}, {total_queries} queries",
+          "purple", out / f"rlhf_ensemble_s{seed}_results.png")
 
 
 # ---------------------------------------------------------------------------
 # Human training (interactive)
 # ---------------------------------------------------------------------------
 
-def train_human(total_episodes: int, seed: int) -> None:
-    """Train RLHF with real human clip comparisons via pygame UI."""
+def train_human(total_episodes: int, seed: int, n_models: int) -> None:
+    """Train RLHF Ensemble with real human clip comparisons.
+
+    Human is shown the most uncertain pairs (§2.2.4 uncertainty-based query
+    selection) rather than random pairs, making each label maximally informative.
+    """
     warmup_eps  = max(10, int(total_episodes * cfg.RLHF_WARMUP_FRACTION))
     remaining   = total_episodes - warmup_eps
     num_iter    = max(1, remaining // cfg.RLHF_EPISODES_PER_ITER)
 
-    out = pathlib.Path(cfg.experiment_dir(total_episodes, "rlhf-human"))
+    out = pathlib.Path(cfg.experiment_dir(total_episodes, "rlhf-ensemble-human"))
     out.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
-    print(f"  RLHF (human)  —  {total_episodes} episodes  seed={seed}")
+    print(f"  RLHF Ensemble (human)  —  {total_episodes} eps  seed={seed}  K={n_models}")
+    print(f"  Query selection: uncertainty-based (most uncertain pairs shown)")
+    print(f"  Reward: normalised (zero mean / unit std §2.2.1)")
     print(f"  Warm-up: {warmup_eps} eps  |  Iterations: {num_iter} × {cfg.RLHF_EPISODES_PER_ITER} eps")
     print(f"  Output: {out}")
     print("=" * 60)
@@ -346,8 +400,11 @@ def train_human(total_episodes: int, seed: int) -> None:
     env_rgb  = gym.make("CartPole-v1", render_mode="rgb_array")
     env_rl   = gym.make("CartPole-v1")
     agent    = make_agent(rng)
-    reward_model = RewardModel(obs_dim=env_rgb.observation_space.shape[0], rng=rng)
+    ensemble = EnsembleRewardModel(
+        n_models=n_models, obs_dim=env_rgb.observation_space.shape[0], rng=rng
+    )
 
+    # Buffer stores (obs_array, frames) pairs so we can replay clips to the human
     seg_buf: collections.deque[tuple[np.ndarray, list]] = (
         collections.deque(maxlen=cfg.RLHF_SEGMENT_BUFFER)
     )
@@ -361,14 +418,14 @@ def train_human(total_episodes: int, seed: int) -> None:
     # Intro screen
     screen.fill(_COL_BG)
     for text, fnt, col, y in [
-        ("RLHF  —  Human Preference Labelling", font_l, _COL_YELLOW,  80),
-        ("Watch pairs of CartPole clips",        font_s, _COL_WHITE,  150),
-        ("Press a key to say which looks better.", font_s, _COL_WHITE, 185),
-        ("[A]  Clip A was better",  font_s, _COL_A,    240),
-        ("[B]  Clip B was better",  font_s, _COL_B,    275),
-        ("[S]  Skip / tie",         font_s, _COL_SKIP,  310),
-        ("[Esc]  Quit early",       font_s, _COL_SKIP,  345),
-        ("Press any key to start…", font_s, _COL_YELLOW, 410),
+        ("RLHF Ensemble — Human Labelling",      font_l, _COL_YELLOW,  70),
+        (f"Ensemble K={n_models} — uncertainty-based pair selection", font_s, _COL_WHITE, 130),
+        ("You will see the pairs the model is MOST uncertain about.", font_s, _COL_WHITE, 165),
+        ("[A]  Clip A was better",  font_s, _COL_A,    220),
+        ("[B]  Clip B was better",  font_s, _COL_B,    255),
+        ("[S]  Skip / tie",         font_s, _COL_SKIP,  290),
+        ("[Esc]  Quit early",       font_s, _COL_SKIP,  325),
+        ("Press any key to start…", font_s, _COL_YELLOW, 400),
     ]:
         surf = fnt.render(text, True, col)
         screen.blit(surf, (_WIN_W // 2 - surf.get_width() // 2, y))
@@ -379,7 +436,7 @@ def train_human(total_episodes: int, seed: int) -> None:
         env_rl.close()
         return
 
-    # Phase 1 — warm-up
+    # Phase 1 — warm-up (no human needed)
     print("=== Phase 1: Warm-up ===")
     for ep in range(warmup_eps):
         episode_lengths.append(run_rl_episode(env_rl, agent))
@@ -391,27 +448,40 @@ def train_human(total_episodes: int, seed: int) -> None:
         seg = _collect_segment_with_frames(env_rgb, agent, cfg.RLHF_SEGMENT_LENGTH)
         seg_buf.append(seg)
 
-    # Phase 2 — bootstrap
+    # Phase 2 — bootstrap with human labels on uncertain pairs
     print(f"\n=== Phase 2: Bootstrap — {cfg.RLHF_PAIRS_PER_ITER} preference pairs ===")
-    segs_a, segs_b, prefs = _collect_human_preferences(
-        screen, font_l, font_s, clock, list(seg_buf), cfg.RLHF_PAIRS_PER_ITER, rng
-    )
+    # For bootstrap, ensemble is untrained so all pairs are equally uncertain — use random
+    indices = list(range(len(seg_buf)))
+    segs_a_obs, segs_b_obs, prefs = [], [], []
+    for k in range(cfg.RLHF_PAIRS_PER_ITER):
+        i, j = rng.choice(indices, size=2, replace=False)
+        obs_a, frames_a = list(seg_buf)[i]
+        obs_b, frames_b = list(seg_buf)[j]
+        mu = _query_human(screen, font_l, font_s, clock, frames_a, frames_b,
+                          pair_index=k + 1, total_pairs=cfg.RLHF_PAIRS_PER_ITER)
+        if mu is None:
+            print("  User quit during bootstrap.")
+            break
+        segs_a_obs.append(obs_a)
+        segs_b_obs.append(obs_b)
+        prefs.append(mu)
+
     human_labels += len(prefs)
     if len(prefs) >= 2:
         for _ in range(cfg.RLHF_RM_EPOCHS):
-            loss = reward_model.train_on_preferences(segs_a, segs_b, prefs)
+            loss = ensemble.train_on_preferences(segs_a_obs, segs_b_obs, prefs)
         rm_losses.append(loss)
         print(f"  Bootstrap done: {len(prefs)} labels, loss={loss:.4f}")
 
-    # Phase 3 — RLHF loop
-    print("\n=== Phase 3: RLHF loop ===")
+    # Phase 3 — RLHF loop with uncertainty-based query selection
+    print("\n=== Phase 3: RLHF loop (ensemble + uncertainty-based human queries) ===")
     for iteration in range(1, num_iter + 1):
         if _pump_quit():
             print("  User quit.")
             break
 
         iter_lengths = [
-            run_rl_episode(env_rl, agent, reward_model)
+            run_rl_episode(env_rl, agent, ensemble, normalise=True)
             for _ in range(cfg.RLHF_EPISODES_PER_ITER)
         ]
         episode_lengths.extend(iter_lengths)
@@ -421,17 +491,19 @@ def train_human(total_episodes: int, seed: int) -> None:
         iter_fps     = int(15 + 30 * progress)
 
         for _ in range(cfg.RLHF_SEGMENTS_PER_ITER):
-            seg = _collect_segment_with_frames(env_rgb, agent, iter_seg_len, reward_model)
+            seg = _collect_segment_with_frames(env_rgb, agent, iter_seg_len, ensemble)
             seg_buf.append(seg)
 
-        segs_a, segs_b, prefs = _collect_human_preferences(
-            screen, font_l, font_s, clock, list(seg_buf), cfg.RLHF_PAIRS_PER_ITER, rng, fps=iter_fps
+        # Show human the most uncertain pairs (§2.2.4)
+        segs_a_obs, segs_b_obs, prefs = _collect_human_preferences_uncertain(
+            screen, font_l, font_s, clock,
+            list(seg_buf), ensemble, cfg.RLHF_PAIRS_PER_ITER, rng, fps=iter_fps,
         )
         human_labels += len(prefs)
 
         if len(prefs) >= 2:
             for _ in range(cfg.RLHF_RM_EPOCHS):
-                loss = reward_model.train_on_preferences(segs_a, segs_b, prefs)
+                loss = ensemble.train_on_preferences(segs_a_obs, segs_b_obs, prefs)
             rm_losses.append(loss)
         elif rm_losses:
             loss = rm_losses[-1]
@@ -449,14 +521,14 @@ def train_human(total_episodes: int, seed: int) -> None:
     env_rl.close()
     pygame.quit()
 
-    agent.save(out / f"rlhf_human_s{seed}_model.npz")
-    reward_model.save(out / f"rlhf_human_s{seed}_reward_model.npz")
-    save_history_csv(episode_lengths, out / f"rlhf_human_s{seed}_history.csv")
+    agent.save(out / f"rlhf_ensemble_human_s{seed}_model.npz")
+    ensemble.save(out, prefix=f"rlhf_ensemble_human_s{seed}")
+    save_history_csv(episode_lengths, out / f"rlhf_ensemble_human_s{seed}_history.csv")
     print(f"\nSaved to {out}/  |  Total human labels: {human_labels}")
 
-    _plot(episode_lengths, rm_losses, warmup_eps,
-          f"RLHF (human) — {total_episodes} eps, seed={seed}, {human_labels} labels",
-          "steelblue", out / f"rlhf_human_s{seed}_results.png")
+    _plot(episode_lengths, rm_losses, warmup_eps, n_models, human_labels,
+          f"RLHF Ensemble human (K={n_models}) — {total_episodes} eps, seed={seed}",
+          "darkorchid", out / f"rlhf_ensemble_human_s{seed}_results.png")
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +539,8 @@ def _plot(
     episode_lengths: list[int],
     rm_losses: list[float],
     warmup_eps: int,
+    n_models: int,
+    total_queries: int,
     title: str,
     color: str,
     save_path: pathlib.Path,
@@ -491,8 +565,8 @@ def _plot(
     ax = axes[1]
     if rm_losses:
         ax.plot(rm_losses, color=color, marker="o", markersize=3)
-    ax.set(xlabel="Reward model update", ylabel="Preference loss",
-           title="Reward model learning")
+    ax.set(xlabel="Reward model update", ylabel="Preference loss (avg ensemble)",
+           title=f"Ensemble reward model (K={n_models})")
     ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -502,14 +576,17 @@ def _plot(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="RLHF training (oracle or human preferences)")
+    parser = argparse.ArgumentParser(
+        description="RLHF with ensemble, uncertainty queries, reward normalisation"
+    )
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--seed",     type=int, default=0)
+    parser.add_argument("--n-models", type=int, default=cfg.ENSEMBLE_N_MODELS)
     parser.add_argument("--human",    action="store_true",
                         help="Use real human clip comparisons instead of simulated oracle")
     args = parser.parse_args()
 
     if args.human:
-        train_human(args.episodes, args.seed)
+        train_human(args.episodes, args.seed, args.n_models)
     else:
-        train(args.episodes, args.seed)
+        train(args.episodes, args.seed, args.n_models)

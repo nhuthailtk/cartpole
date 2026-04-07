@@ -29,101 +29,59 @@ Oracle policy (per timestep, 30% trigger probability):
 import argparse
 import pathlib
 import sys
-from dataclasses import asdict
 
 import gymnasium as gym
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
-from cartpole.agents import QLearningAgent
-from cartpole.entities import EpisodeHistory, EpisodeHistoryRecord
-from cartpole.oracle import oracle_feedback
+from cartpole import config as cfg
 from cartpole.reward_model import HCRLRewardModel
+from cartpole.train_utils import make_agent, run_hcrl_episode
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-# --- Configuration ---
-FEEDBACK_WEIGHTS = [5, 20, 50]
-SEEDS = [0, 1, 2]                    # 3 seeds per weight for statistical validity
-MAX_TIMESTEPS = 200
-TERMINATE_PENALTY = 5000
+FEEDBACK_WEIGHTS = cfg.SENSITIVITY_WEIGHTS
+SEEDS            = cfg.SEEDS
+
+
 def get_experiment_dir(max_episodes: int) -> pathlib.Path:
-    return pathlib.Path(f"experiment-results/ep{max_episodes}/sensitivity")
+    return pathlib.Path(cfg.experiment_dir(max_episodes, "sensitivity"))
 
-
-# --- Training loop with oracle HCRL ---
 
 def run_oracle_hcrl(weight: float, seed: int, max_episodes: int):
     """
-    Train a Q-Learning agent with oracle human feedback at the given reward weight.
+    Train HCRL with oracle feedback at the given feedback weight (full window).
 
-    Pipeline (matches train_hcrl.py):
-      1. oracle_feedback() fires each step with 50% probability.
-      2. If oracle fires  → use signal directly; add to reward model buffer.
-      3. If oracle silent → use HCRLRewardModel prediction (once trained).
-      4. Fallback to env reward (+1/step) before model has data.
-      5. Retrain reward model after each episode.
-
+    Uses run_hcrl_episode() from train_utils — same logic as train_hcrl.py.
     Returns (episode_df, agent, reward_model).
-    Feedback window: all episodes (Full Feedback).
     """
-    rng = np.random.default_rng(seed=seed)
-    env = gym.make("CartPole-v1")
+    rng  = np.random.default_rng(seed=seed)
+    env  = gym.make("CartPole-v1")
+    agent        = make_agent(rng)
+    reward_model = HCRLRewardModel(obs_dim=env.observation_space.shape[0])
+    model_ready  = False
 
-    agent = QLearningAgent(
-        learning_rate=0.05,
-        discount_factor=0.95,
-        exploration_rate=0.5,
-        exploration_decay_rate=0.99,
-        random_state=rng,
-    )
-
-    reward_model = HCRLRewardModel(obs_dim=env.observation_space.shape[0],
-                                   hidden_dim=64, lr=1e-3)
-    model_ready = False
     rm_obs_buf:    list[np.ndarray] = []
     rm_reward_buf: list[float]      = []
+    records: list[dict] = []
 
-    records = []
-    for episode_index in range(max_episodes):
-        obs, _ = env.reset()
-        action = agent.begin_episode(obs)
+    for ep in range(max_episodes):
+        ep_len, new_obs, new_rew, _ = run_hcrl_episode(
+            env, agent, reward_model if model_ready else None, rng,
+            feedback_weight=weight,
+            in_feedback_window=True,
+        )
+        rm_obs_buf.extend(new_obs)
+        rm_reward_buf.extend(new_rew)
+        records.append({
+            "episode_index":  ep,
+            "episode_length": ep_len,
+            "is_successful":  ep_len >= cfg.MAX_TIMESTEPS,
+        })
 
-        for t in range(MAX_TIMESTEPS):
-            next_obs, env_reward, terminated, truncated, _ = env.step(action)
-
-            oracle_signal = oracle_feedback(obs, weight, rng)
-
-            if oracle_signal != 0.0:
-                rm_obs_buf.append(obs.copy())
-                rm_reward_buf.append(oracle_signal)
-                shaped = oracle_signal
-            elif model_ready:
-                shaped = float(reward_model.predict(obs))
-            else:
-                shaped = env_reward  # fallback before model has data
-
-            is_successful = t >= MAX_TIMESTEPS - 1
-            if terminated and not is_successful:
-                shaped += float(-TERMINATE_PENALTY)
-
-            action = agent.act(next_obs, shaped)
-            obs = next_obs
-
-            if terminated or truncated or is_successful:
-                records.append({
-                    "episode_index":  episode_index,
-                    "episode_length": t + 1,
-                    "is_successful":  is_successful,
-                })
-                break
-
-        # Retrain reward model after each episode
         if len(rm_obs_buf) >= 2:
-            reward_model.train_on_feedback(
-                np.array(rm_obs_buf), np.array(rm_reward_buf), epochs=20
-            )
+            reward_model.train_on_feedback(np.array(rm_obs_buf), np.array(rm_reward_buf))
             model_ready = True
 
     env.close()

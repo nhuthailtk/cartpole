@@ -35,42 +35,37 @@ Usage:
 
 import argparse
 import pathlib
-from dataclasses import asdict
 
 import gymnasium as gym
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
+from cartpole import config as cfg
 from cartpole.agents import QLearningAgent
 from cartpole.entities import EpisodeHistory, EpisodeHistoryRecord
-from cartpole.oracle import oracle_feedback
 from cartpole.reward_model import HCRLRewardModel
-from train_hcrl import run_hcrl_agent, save_feedback_log, save_history
-
+from cartpole.train_utils import (
+    make_agent,
+    make_episode_history,
+    run_hcrl_episode,
+    save_episode_history_csv,
+    save_feedback_csv,
+)
+from train_hcrl import run_hcrl_agent
 
 COLORS = ["green", "orange", "purple", "red"]
-SEEDS = [0, 1, 2]
+SEEDS  = cfg.SEEDS
 
 
 def get_conditions(max_episodes: int) -> list[dict]:
-    """
-    Build the 4 timing conditions with windows scaled to max_episodes:
-      Early:         0%  → 20%
-      Mid:          40%  → 60%
-      Late:         80%  → 100%
-      Full Feedback: 0%  → 100% (no window restriction)
-    """
+    """Build the 4 timing conditions scaled to max_episodes."""
     n = max_episodes
     return [
-        {"name": "early",         "label": "Early (0-20%)",   "window": (0,              int(0.2 * n))},
-        {"name": "mid",           "label": "Mid (40-60%)",    "window": (int(0.4 * n),   int(0.6 * n))},
-        {"name": "late",          "label": "Late (80-100%)",  "window": (int(0.8 * n),   n)},
-        {"name": "full_feedback", "label": "Full Feedback",   "window": (0,              n)},
+        {"name": k, "label": f"{k.replace('_', ' ').title()} ({int(v[0]*100)}-{int(v[1]*100)}%)",
+         "window": (int(v[0] * n), int(v[1] * n))}
+        for k, v in cfg.TIMING_CONDITIONS.items()
     ]
-
-MAX_TIMESTEPS = 200
-TERMINATE_PENALTY = 5000
 
 
 def run_oracle_condition(
@@ -78,109 +73,65 @@ def run_oracle_condition(
     window: tuple[int, int],
     max_episodes: int,
     seed: int,
-    feedback_weight: float = 10.0,
+    feedback_weight: float = cfg.HCRL_FEEDBACK_WEIGHT,
 ):
     """
-    Train one timing condition using oracle feedback + HCRLRewardModel.
+    Train one timing condition using run_hcrl_episode() from train_utils.
 
-    Pipeline (matches train_hcrl.py):
-      - Inside feedback window: oracle fires each step (50% prob).
-          oracle signal → add to reward model buffer; use as reward.
-          oracle silent  → use HCRLRewardModel prediction (if trained).
-      - Outside feedback window: no new oracle signals.
-          Use HCRLRewardModel prediction (if trained) or env reward (fallback).
-      - Reward model retrained after every episode.
+    The oracle fires only when the current episode is inside [fb_start, fb_end).
+    The reward model is retrained after every episode on all collected signals.
 
     Returns (episode_history, feedback_log, agent, reward_model).
     """
-    import time
     rng = np.random.default_rng(seed=seed)
     env = gym.make("CartPole-v1")
     fb_start, fb_end = window
 
-    agent = QLearningAgent(
-        learning_rate=0.05,
-        discount_factor=0.95,
-        exploration_rate=0.5,
-        exploration_decay_rate=0.99,
-        random_state=rng,
-    )
+    agent        = make_agent(rng)
+    reward_model = HCRLRewardModel(obs_dim=env.observation_space.shape[0])
+    model_ready  = False
 
-    reward_model = HCRLRewardModel(obs_dim=env.observation_space.shape[0],
-                                   hidden_dim=64, lr=1e-3)
-    model_ready = False
+    episode_history = make_episode_history()
+    all_feedback:  list[dict]       = []
     rm_obs_buf:    list[np.ndarray] = []
     rm_reward_buf: list[float]      = []
 
-    episode_history = EpisodeHistory(
-        max_timesteps_per_episode=MAX_TIMESTEPS,
-        goal_avg_episode_length=195,
-        goal_consecutive_episodes=30,
-    )
-    feedback_log: list[dict] = []
-    t0 = time.time()
+    for ep in range(max_episodes):
+        in_window = fb_start <= ep < fb_end
+        ep_len, new_obs, new_rew, fb_log = run_hcrl_episode(
+            env, agent, reward_model if model_ready else None, rng,
+            feedback_weight=feedback_weight,
+            in_feedback_window=in_window,
+        )
+        # Annotate feedback log with episode index
+        for entry in fb_log:
+            entry["episode"] = ep
+            entry["timestep"] = entry.pop("episode_step", 0)
+        all_feedback.extend(fb_log)
+        rm_obs_buf.extend(new_obs)
+        rm_reward_buf.extend(new_rew)
 
-    for episode_index in range(max_episodes):
-        obs, _ = env.reset()
-        action = agent.begin_episode(obs)
-        in_window = fb_start <= episode_index < fb_end
+        episode_history.record_episode(EpisodeHistoryRecord(
+            episode_index=ep, episode_length=ep_len,
+            is_successful=ep_len >= cfg.MAX_TIMESTEPS,
+        ))
 
-        for timestep_index in range(MAX_TIMESTEPS):
-            next_obs, env_reward, terminated, truncated, _ = env.step(action)
-
-            if in_window:
-                oracle_signal = oracle_feedback(obs, feedback_weight, rng)
-            else:
-                oracle_signal = 0.0  # feedback window closed
-
-            if oracle_signal != 0.0:
-                rm_obs_buf.append(obs.copy())
-                rm_reward_buf.append(oracle_signal)
-                shaped = oracle_signal
-                feedback_log.append({
-                    "timestamp":     time.time() - t0,
-                    "episode":       episode_index,
-                    "timestep":      timestep_index,
-                    "feedback":      "positive" if oracle_signal > 0 else "negative",
-                    "magnitude":     abs(oracle_signal),
-                    "reward":        oracle_signal,
-                    "cart_position": float(obs[0]),
-                    "cart_velocity": float(obs[1]),
-                    "pole_angle":    float(obs[2]),
-                    "pole_velocity": float(obs[3]),
-                })
-            elif model_ready:
-                shaped = float(reward_model.predict(obs))
-            else:
-                shaped = env_reward  # fallback before model has data
-
-            is_successful = timestep_index >= MAX_TIMESTEPS - 1
-            if terminated and not is_successful:
-                shaped += float(-TERMINATE_PENALTY)
-
-            action = agent.act(next_obs, shaped)
-            obs = next_obs
-
-            if terminated or is_successful:
-                episode_history.record_episode(
-                    EpisodeHistoryRecord(
-                        episode_index=episode_index,
-                        episode_length=timestep_index + 1,
-                        is_successful=is_successful,
-                    )
-                )
-                break
-
-        # Retrain reward model after each episode
         if len(rm_obs_buf) >= 2:
-            reward_model.train_on_feedback(
-                np.array(rm_obs_buf), np.array(rm_reward_buf), epochs=20
-            )
+            reward_model.train_on_feedback(np.array(rm_obs_buf), np.array(rm_reward_buf))
             model_ready = True
 
     env.close()
-    print(f"    {name}: {max_episodes} eps done, feedback={len(feedback_log)}")
-    return episode_history, feedback_log, agent, reward_model
+    print(f"    {name}: {max_episodes} eps done, feedback={len(all_feedback)}")
+    return episode_history, all_feedback, agent, reward_model
+
+
+# Backward-compatible wrappers (used by run_experiment below)
+def save_feedback_log(feedback_log, experiment_dir, filename="hcrl_feedback_log.csv"):
+    return save_feedback_csv(feedback_log, pathlib.Path(experiment_dir) / filename)
+
+
+def save_history(history, experiment_dir, filename="hcrl_episode_history.csv"):
+    return save_episode_history_csv(history, pathlib.Path(experiment_dir) / filename)
 
 
 # ---------------------------------------------------------------------------

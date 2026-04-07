@@ -4,54 +4,28 @@
 > Hanoi University of Science and Technology
 > Instructor: Assoc. Prof. Thân Quang Khoát
 
-A CartPole-v1 balancing agent using **tabular Q-Learning** extended with two human-feedback paradigms:
+Implementation and comparison of two human-feedback RL paradigms from the research papers:
 
-- **HCRL** (Human-Centered RL / TAMER) — human gives real-time scalar feedback (+/−) at individual timesteps; a learned `HCRLRewardModel` fills in predictions when the human is silent
-- **RLHF** (Reinforcement Learning from Human Preferences, Christiano et al. 2017) — human compares pairs of trajectory clips; a learned `RewardModel` drives the agent
-
-Every method comes in **two flavours**:
-
-| Script | Mode | Oracle / Human |
-|---|---|---|
-| `train_hcrl.py` | HCRL automated | Simulated oracle (`oracle_feedback`) |
-| `train_hcrl_human.py` | HCRL interactive | Real human (arrow keys) |
-| `train_rlhf.py` | RLHF automated | Simulated oracle (`oracle_preference`) |
-| `train_rlhf_human.py` | RLHF interactive | Real human (pygame clip comparison) |
-
-The project also investigates:
-
-1. **Timing** — when during training is HCRL feedback most effective (early / mid / late / throughout)?
-2. **Magnitude** — how does the scale of the feedback signal affect learning?
+| Paper | Algorithm | Training Script |
+|-------|-----------|-----------------|
+| Knox & Stone (2009); Li et al. (2019) | **TAMER / HCRL** — per-timestep scalar feedback | `train_hcrl.py` |
+| Knox & Stone (2012); Li et al. (2019) | **VI-TAMER** — non-myopic TAMER with value function | `train_vi_tamer.py` |
+| Christiano et al. (2017) | **RLHF** — pairwise trajectory preferences | `train_rlhf.py` |
+| Christiano et al. (2017) §2.2 full | **RLHF + Ensemble** — ensemble, uncertainty queries, reward normalisation | `train_rlhf_ensemble.py` |
 
 ---
 
 ## Table of Contents
 
 - [Background](#background)
-- [Method](#method)
+- [Algorithm Overview](#algorithm-overview)
 - [Project Structure](#project-structure)
 - [Installation](#installation)
-- [Quick Start — Full Command Sequence](#quick-start--full-command-sequence)
+- [Quick Start](#quick-start)
 - [Scripts Reference](#scripts-reference)
-  - [run.py — Baseline](#runpy--baseline)
-  - [train_hcrl.py — HCRL (oracle)](#train_hcrlpy--hcrl-oracle)
-  - [train_hcrl_human.py — HCRL (human)](#train_hcrl_humanpy--hcrl-human)
-  - [train_rlhf.py — RLHF (oracle)](#train_rlhfpy--rlhf-oracle)
-  - [train_rlhf_human.py — RLHF (human)](#train_rlhf_humanpy--rlhf-human)
-  - [feedback_timing_experiment.py](#feedback_timing_experimentpy)
-  - [sensitivity_analysis.py](#sensitivity_analysispy)
-  - [run_all.py — Full automated pipeline](#run_allpy--full-automated-pipeline)
-  - [compare_all.py — Big-picture comparison](#compare_allpy--big-picture-comparison)
-  - [compare_models.py](#compare_modelspy)
-  - [convergence_analysis.py](#convergence_analysispy)
-  - [analyze_feedback.py](#analyze_feedbackpy)
-  - [watch.py](#watchpy)
-  - [visual_compare.py](#visual_comparepy)
-  - [webapp.py — Web Visualizer](#webapppy--web-visualizer)
-- [Output Directory Layout](#output-directory-layout)
 - [Hyperparameter Reference](#hyperparameter-reference)
+- [Output Directory Layout](#output-directory-layout)
 - [Development](#development)
-- [Troubleshooting](#troubleshooting)
 - [References](#references)
 
 ---
@@ -60,86 +34,90 @@ The project also investigates:
 
 ### CartPole-v1
 
-A pole is mounted on a cart moving along a frictionless track. The agent pushes left or right to keep the pole upright. Episode ends when:
-
-- Pole angle exceeds ±12° (±0.2095 rad)
-- Cart position exceeds ±2.4 units
-- 200 timesteps elapsed (success)
+A pole is mounted on a cart. The agent pushes left or right to keep the pole upright.
+Episode terminates when:
+- Pole angle > ±12° (±0.2095 rad)
+- Cart position > ±2.4 units
+- 200 timesteps elapsed (= success)
 
 **Solved** = mean episode length ≥ 195 over 30 consecutive episodes.
 
-### TAMER (Knox & Stone, 2009)
+### TAMER — Knox & Stone (2009)
 
-Human trainer gives real-time scalar feedback (+/−) that shapes the agent's reward signal. Key claims:
-- Human feedback accelerates convergence beyond environment reward alone
-- Feedback is most useful **later in training**, when the agent has a semi-stable policy to correct
-- Feedback scale must be calibrated relative to the environment reward
+Human trainer gives real-time scalar feedback (+/−) at individual timesteps.
+A learned `HCRLRewardModel` (MLP regression) generalises those signals to
+all states, filling silence gaps between oracle firings.
 
-### RLHF (Christiano et al., 2017)
+Key research questions tested in this project:
+- **Timing**: when during training is feedback most effective (early / mid / late)?
+- **Magnitude**: how does feedback scale affect learning speed?
 
-Instead of per-timestep labels, the human watches **pairs of trajectory clips** and says which looks better. A neural reward model learns from these pairwise preferences, then drives Q-learning — the agent never sees the true environment reward after warm-up.
+### VI-TAMER — Knox & Stone (2012)
+
+Extends TAMER from myopic (γ=0) to non-myopic (γ>0) by adding a value
+function `Q_H(s,a)` driven by the human reward model `R̂_H`:
+
+```
+TAMER    (γ=0):  policy = argmax_a R̂_H(s,a)          [immediate only]
+VI-TAMER (γ>0):  Q_H(s,a) ← Q_H + α·(R̂_H + γ·max Q_H(s') − Q_H)
+                 policy    = argmax_a Q_H(s,a)          [discounted future]
+```
+
+Setting γ=0 exactly recovers plain TAMER.
+
+### RLHF — Christiano et al. (2017)
+
+Human watches **pairs of trajectory clips** and indicates which looks better.
+A neural `RewardModel` (Bradley-Terry / cross-entropy) learns from these
+pairwise preferences and drives the RL agent — no environment reward needed
+after warm-up.
+
+Full §2.2 improvements (in `train_rlhf_ensemble.py`):
+1. **Ensemble** (K=3 models, bootstrapped training) — §2.2 bullet 1
+2. **Uncertainty-based query selection** (highest ensemble variance) — §2.2.4
+3. **Reward normalisation** (zero mean / unit std, Welford online) — §2.2.1
+4. **Oracle human-error noise** (10% uniform random responses) — §2.2.3
 
 ---
 
-## Method
+## Algorithm Overview
 
-### Q-Learning Agent
+### Q-Learning Agent (shared across all methods)
 
-| Parameter | Value |
-|---|---|
-| State features | Cart position, velocity; pole angle, angular velocity |
-| Discretization bins | 7 per feature → 4,096 total states |
-| Actions | 2 (push left / push right) |
-| Learning rate α | 0.05 (all methods — fair comparison) |
-| Discount factor γ | 0.95 (all methods — fair comparison) |
-| Initial exploration ε₀ | 0.50 |
-| Exploration decay | 0.99 per episode |
+| Parameter | Value | Configured in |
+|-----------|-------|---------------|
+| State discretization | 7 bins/feature → 4,096 states | `config.NUM_BINS` |
+| Learning rate α | 0.05 | `config.AGENT_LR` |
+| Discount factor γ | 0.95 | `config.AGENT_DISCOUNT` |
+| Initial exploration ε₀ | 0.50 | `config.AGENT_EXPLORE` |
+| Exploration decay | 0.99/episode | `config.AGENT_DECAY` |
 
-Q-update rule:
-```
-Q(s,a) ← Q(s,a) + α · [r_total + γ · max Q(s',a') − Q(s,a)]
-```
-
-### HCRL Reward Signal
-
-At each timestep the agent receives a shaped reward:
+### Reward signals per method
 
 ```
-shaped = oracle_signal        (if oracle / human fired)
-shaped = reward_model(obs)    (if silent and model trained)
-shaped = env_reward           (fallback: model not yet trained)
+Baseline   → env_reward (+1/step) or −BASELINE_TERMINATE_PENALTY
 
-r_total = shaped − TERMINATE_PENALTY   (on early termination)
-r_total = shaped                       (normal step)
+HCRL/TAMER → oracle_signal          (if oracle fired, 50% prob)
+           → reward_model.predict() (if silent and model trained)
+           → env_reward             (fallback before first training)
+
+VI-TAMER   → same as HCRL for oracle signal
+           → Q_H updated via: R̂_H(s,a) + γ·max Q_H(s')  [TD non-myopic]
+
+RLHF       → reward_model.predict(obs)  (trained on pairwise preferences)
+           → env_reward during warm-up phase
 ```
 
-### HCRL Reward Model (`HCRLRewardModel`)
-
-Trained by **MSE regression** on `(observation, feedback)` pairs accumulated across all episodes so far. Retrained after every episode. This lets the agent receive a meaningful reward signal even when the oracle/human is silent.
+### Reward model architectures (both share `_MLPBase`)
 
 ```
-Loss = (1/N) Σ (r̂(sᵢ) − hᵢ)²     hᵢ ∈ {+WEIGHT, −WEIGHT}
+Architecture:  Linear(4, 64) → tanh → Linear(64, 64) → tanh → Linear(64, 1)
+Optimizer:     Adam (β₁=0.9, β₂=0.999, ε=1e-8)
+
+HCRLRewardModel: loss = MSE(r̂(s), h)          [scalar regression, HCRL]
+RewardModel:     loss = cross-entropy(μ, P̂)   [preference model, RLHF]
+EnsembleRewardModel: K × RewardModel, bootstrapped, with uncertainty scoring
 ```
-
-### RLHF Reward Model (`RewardModel`)
-
-Trained by **cross-entropy on pairwise preferences** (Bradley-Terry model):
-
-```
-P̂(A ≻ B) = exp(Σ r̂(sₜᴬ)) / (exp(Σ r̂(sₜᴬ)) + exp(Σ r̂(sₜᴮ)))
-Loss     = −[ μ · log P̂(A≻B) + (1−μ) · log P̂(B≻A) ]
-```
-
-`μ = 1` if human (or oracle) preferred clip A, `0` if B, `0.5` if tie.
-
-Both reward models share architecture: **2-layer MLP** (obs_dim → 64 → 64 → 1, tanh activations) trained with Adam. Saved as `.npz`.
-
-### Oracle (Automated Human)
-
-For fully reproducible experiments:
-
-- **HCRL oracle** (`oracle_feedback`) — gives ±WEIGHT feedback based on pole angle and cart position stability. Fires with 50% probability per timestep (models human reaction time).
-- **RLHF oracle** (`oracle_preference`) — Boltzmann-rational model that picks the better clip with probability proportional to `exp(sum_of_rewards / T)`.
 
 ---
 
@@ -148,40 +126,65 @@ For fully reproducible experiments:
 ```
 ML-Project/
 │
-├── cartpole/                          # Core library
-│   ├── __init__.py                    # Public API exports
-│   ├── agents.py                      # Agent (ABC), RandomActionAgent, QLearningAgent
-│   ├── entities.py                    # EpisodeHistory, EpisodeHistoryRecord, type aliases
-│   ├── plotting.py                    # Live Matplotlib training plot
-│   ├── oracle.py                      # Simulated human oracles (HCRL + RLHF)
-│   └── reward_model.py                # RewardModel (RLHF) + HCRLRewardModel (TAMER)
+├── cartpole/                       # Core library (Python package)
+│   ├── __init__.py                 # Public exports
+│   ├── config.py                   # ALL hyperparameters — single source of truth
+│   ├── agents.py                   # QLearningAgent, VITAMERAgent, RandomActionAgent
+│   │                               # Shared _DiscretizationMixin base class
+│   ├── entities.py                 # EpisodeHistory, type aliases
+│   ├── oracle.py                   # oracle_feedback() — HCRL simulated oracle
+│   ├── reward_model.py             # _MLPBase, RewardModel, HCRLRewardModel,
+│   │                               # EnsembleRewardModel, oracle_preference()
+│   ├── train_utils.py              # Shared training helpers used by all scripts:
+│   │                               #   run_hcrl_episode, run_vi_tamer_episode,
+│   │                               #   run_rl_episode, collect_segment,
+│   │                               #   sample_preference_pairs, evaluate_agent,
+│   │                               #   make_agent, save_history_csv, ...
+│   └── plotting.py                 # Live Matplotlib training plot
 │
-├── run.py                             # Baseline Q-Learning, 3 seeds
+├── run.py                          # Baseline Q-Learning (3 seeds)
 │
-├── train_hcrl.py                      # HCRL oracle (automated, simulated human)
-├── train_hcrl_human.py                # HCRL human (interactive, arrow keys)
-├── train_rlhf.py                      # RLHF oracle (automated, simulated human)
-├── train_rlhf_human.py                # RLHF human (interactive, pygame clip viewer)
+├── train_hcrl.py                   # HCRL/TAMER — simulated oracle (automated)
+├── train_hcrl_human.py             # HCRL — real human (arrow keys, interactive)
+├── train_vi_tamer.py               # VI-TAMER — non-myopic, simulated oracle
+├── train_rlhf.py                   # RLHF baseline — single reward model
+├── train_rlhf_ensemble.py          # RLHF full §2.2 — ensemble + all improvements
+├── train_rlhf_human.py             # RLHF — real human (pygame clip comparison)
 │
-├── feedback_timing_experiment.py      # Timing: Early/Mid/Late/Full × 3 seeds
-├── sensitivity_analysis.py            # Weight sensitivity: [5,20,50] × 3 seeds
-├── run_all.py                         # Full automated pipeline (no human scripts)
+├── feedback_timing_experiment.py   # When is feedback most effective? (4 conditions)
+├── sensitivity_analysis.py         # Feedback magnitude study (weights 5/20/50)
+├── run_all.py                      # Full automated pipeline orchestrator
 │
-├── compare_all.py                     # Big-picture: all 12 methods, one chart
-├── compare_models.py                  # Training curves + gameplay for HCRL conditions
-├── convergence_analysis.py            # Threshold-crossing convergence speed
-├── analyze_feedback.py                # Analyze human feedback logs
+├── compare_all.py                  # Big-picture comparison of all methods
+├── compare_models.py               # Training curves + gameplay for HCRL conditions
+├── compare_rlhf.py                 # RLHF oracle vs human comparison
+├── convergence_analysis.py         # Threshold-crossing convergence speed
+├── analyze_feedback.py             # Analyze feedback patterns from logs
 │
-├── watch.py                           # Watch a single model play (pygame)
-├── visual_compare.py                  # Up to 6 models side-by-side (pygame)
-├── webapp.py                          # Flask web visualizer (stream to browser)
+├── replay.py                       # Replay a saved agent model
+├── watch.py                        # Watch a model play (pygame)
+├── visual_compare.py               # Up to 6 models side-by-side (pygame)
+├── webapp.py                       # Flask web visualizer (stream to browser)
+│
+├── paper/
+│   ├── R6-Human-centered reinforcement learning- A survey -19.pdf
+│   └── R6-Deep reinforcement learning from human preferences -17.pdf
 │
 ├── tests/
 │   ├── test_episode_history.py
 │   ├── test_qlearning_agent.py
 │   └── test_random_agent.py
 │
-└── experiment-results/                # All outputs (models, CSVs, plots)
+└── experiment-results/             # All outputs (auto-created)
+    └── ep{N}/
+        ├── baseline_s{seed}_model.npz
+        ├── baseline_s{seed}_history.csv
+        ├── hcrl-oracle/
+        ├── vi-tamer/
+        ├── rlhf-oracle/
+        ├── rlhf-ensemble/
+        ├── timing-experiment/
+        └── sensitivity/
 ```
 
 ---
@@ -190,518 +193,170 @@ ML-Project/
 
 This project uses [uv](https://docs.astral.sh/uv/) for dependency management.
 
-**Install uv:**
 ```bash
-# Windows (PowerShell)
+# Install uv (Windows PowerShell)
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# macOS / Linux
+# Install uv (macOS / Linux)
 curl -Ls https://astral.sh/uv/install.sh | sh
-```
 
-**Install dependencies:**
-```bash
+# Install project dependencies
 uv sync
 ```
 
 ---
 
-## Quick Start — Full Command Sequence
+## Quick Start
 
-Run all steps in this order (replace `100` with your desired episode count).  
-Steps 1–6 are **fully automated** (no human required). Steps 7–8 require you at the keyboard.
+All automated steps — no human interaction required.
 
 ```bash
-# ── Step 1: Baseline ─────────────────────────────────────────────────────────
-uv run python run.py --episodes 100
+# 1. Baseline Q-Learning (control condition)
+uv run python run.py --episodes 200
 
-# ── Step 2: HCRL oracle (automated, oracle_feedback + HCRLRewardModel) ───────
-uv run python train_hcrl.py --episodes 100 --seed 0
+# 2. HCRL / TAMER  (Li et al. 2019, Knox & Stone 2009)
+uv run python train_hcrl.py --episodes 200 --seed 0
 
-# ── Step 3: RLHF oracle (automated, oracle_preference + RewardModel) ─────────
-uv run python train_rlhf.py --episodes 100 --seed 0
+# 3. VI-TAMER  (Knox & Stone 2012, non-myopic)
+uv run python train_vi_tamer.py --episodes 200 --seed 0
+uv run python train_vi_tamer.py --episodes 200 --seed 0 --gamma 0   # γ=0 → plain TAMER
 
-# ── Step 4: HCRL timing experiment (4 conditions × 3 seeds) ──────────────────
-uv run python feedback_timing_experiment.py --auto --episodes 100
+# 4. RLHF baseline  (Christiano et al. 2017)
+uv run python train_rlhf.py --episodes 200 --seed 0
 
-# ── Step 5: HCRL sensitivity analysis (3 weights × 3 seeds) ──────────────────
-uv run python sensitivity_analysis.py --episodes 100
+# 5. RLHF + Ensemble  (Christiano et al. 2017, full §2.2)
+uv run python train_rlhf_ensemble.py --episodes 200 --seed 0
 
-# ── Step 6: Compare all automated methods ────────────────────────────────────
-uv run python compare_all.py --episodes 100 --seed 0
+# 6. Timing experiment  (when is feedback most effective?)
+uv run python feedback_timing_experiment.py --auto --episodes 200
 
-# ── Step 7 (optional, interactive): HCRL with real human arrow-key feedback ──
-uv run python train_hcrl_human.py --episodes 100 --seed 0
+# 7. Sensitivity analysis  (how does feedback magnitude matter?)
+uv run python sensitivity_analysis.py --episodes 200
 
-# ── Step 8 (optional, interactive): RLHF with real human clip comparisons ────
-uv run python train_rlhf_human.py --episodes 100 --seed 0
-
-# ── Step 9 (optional): Re-run compare_all after interactive steps ─────────────
-uv run python compare_all.py --episodes 100 --seed 0
+# 8. Full pipeline (runs steps 1, 6, 7, then analysis)
+uv run python run_all.py --episodes 200
 ```
 
-**One-command automated pipeline** (steps 1–6 combined, skips interactive scripts):
+Interactive training (real human feedback):
+
 ```bash
-uv run python run_all.py --episodes 100
+# HCRL: press Arrow Up (good) / Arrow Down (bad) while watching
+uv run python train_hcrl_human.py
+
+# RLHF: watch two clips, click to choose the better one
+uv run python train_rlhf_human.py
 ```
 
 ---
 
 ## Scripts Reference
 
-### `run.py` — Baseline
+### Training Scripts
 
-Pure Q-Learning with no human feedback. Trains 3 seeds.
+| Script | Paper | Notes |
+|--------|-------|-------|
+| `run.py` | — | Baseline Q-Learning, 3 seeds |
+| `train_hcrl.py` | Li et al. (2019) / Knox & Stone (2009) | TAMER, oracle |
+| `train_hcrl_human.py` | Li et al. (2019) / Knox & Stone (2009) | TAMER, real human |
+| `train_vi_tamer.py` | Knox & Stone (2012) | VI-TAMER, `--gamma` controls γ |
+| `train_rlhf.py` | Christiano et al. (2017) | Single RewardModel |
+| `train_rlhf_ensemble.py` | Christiano et al. (2017) §2.2 | Ensemble + all improvements |
+| `train_rlhf_human.py` | Christiano et al. (2017) | Real human clip comparison |
 
-```bash
-uv run python run.py
-uv run python run.py --episodes 200
-uv run python run.py --episodes 500 --verbose
-```
+### Experiment Scripts
 
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `--episodes` | int | 100 | Training episodes per seed |
-| `--verbose` | flag | off | Render window + live matplotlib plot |
+| Script | Research Question |
+|--------|------------------|
+| `feedback_timing_experiment.py` | When is feedback most effective? (Early 0-20% / Mid 40-60% / Late 80-100% / Full) |
+| `sensitivity_analysis.py` | How does feedback magnitude affect learning? (weights 5/20/50) |
+| `run_all.py` | Full automated pipeline orchestrator |
 
-**Output:** `experiment-results/ep{N}/`
-- `baseline_s{0,1,2}_model.npz`
-- `baseline_s{0,1,2}_history.csv`
+### Analysis Scripts
 
----
+| Script | Output |
+|--------|--------|
+| `compare_all.py` | Learning curves + gameplay for all 10+ methods |
+| `compare_models.py` | Pairwise training curve + gameplay comparison |
+| `compare_rlhf.py` | RLHF oracle vs human comparison |
+| `convergence_analysis.py` | Episodes-to-threshold convergence speed |
+| `analyze_feedback.py` | Feedback density, timing, magnitude patterns |
 
-### `train_hcrl.py` — HCRL (oracle)
+### Visualization Scripts
 
-Automated HCRL using a simulated oracle. No human or display needed. Identical agent hyperparameters to the baseline for fair comparison.
-
-**Pipeline per step:**
-1. `oracle_feedback()` fires with 50% probability → adds to reward model buffer
-2. Oracle silent + model trained → `HCRLRewardModel.predict(obs)`
-3. Oracle silent + model not yet trained → fallback to env reward (+1/step)
-4. End of episode → retrain `HCRLRewardModel` on all collected signals
-
-```bash
-uv run python train_hcrl.py --episodes 100 --seed 0
-uv run python train_hcrl.py --episodes 200 --seed 1
-```
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `--episodes` | int | 100 | Total training episodes |
-| `--seed` | int | 0 | Random seed |
-
-**Key constants:**
-
-| Constant | Default | Description |
-|---|---|---|
-| `ORACLE_TRIGGER_PROB` | 0.5 | Probability oracle fires each timestep |
-| `FEEDBACK_WEIGHT` | 10.0 | Magnitude of +/− oracle signal |
-| `TERMINATE_PENALTY` | 50.0 | Penalty on early episode termination |
-| `REWARD_MODEL_EPOCHS` | 20 | Gradient steps per episode retraining |
-| `REWARD_MODEL_LR` | 1e-3 | Adam LR for HCRLRewardModel |
-
-**Output:** `experiment-results/ep{N}/hcrl-oracle/`
-- `hcrl_oracle_s{seed}_model.npz`
-- `hcrl_oracle_s{seed}_reward_model.npz`
-- `hcrl_oracle_s{seed}_history.csv`
-- `hcrl_oracle_s{seed}_results.png`
+| Script | Usage |
+|--------|-------|
+| `replay.py` | `uv run python replay.py experiment-results/ep200/hcrl-oracle/hcrl_oracle_s0_model.npz` |
+| `watch.py` | `uv run python watch.py <model.npz>` |
+| `visual_compare.py` | `uv run python visual_compare.py <model1.npz> <model2.npz> ...` (up to 6) |
+| `webapp.py` | `uv run python webapp.py` → open `http://localhost:5000` |
 
 ---
 
-### `train_hcrl_human.py` — HCRL (human)
-
-Interactive HCRL: CartPole renders live while you press arrow keys to give real-time feedback. `HCRLRewardModel` fills in predictions when you are silent.
-
-**Pipeline per step:**
-1. Human presses `↑` or `↓` → oracle signal collected; reward model buffer updated
-2. Silent + model trained → `HCRLRewardModel.predict(obs)`
-3. Silent + model not yet trained → fallback to env reward
-4. End of episode → retrain `HCRLRewardModel` on all collected signals
-
-> **Tip:** Click the CartPole window once after it opens so it captures your keystrokes.
-
-```bash
-uv run python train_hcrl_human.py --episodes 100 --seed 0
-uv run python train_hcrl_human.py --episodes 200 --seed 1
-```
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `--episodes` | int | 100 | Total training episodes |
-| `--seed` | int | 0 | Random seed |
-
-**Controls:**
-
-| Key | Effect |
-|---|---|
-| `↑` Arrow Up | Positive feedback (+10) — good move! |
-| `↓` Arrow Down | Negative feedback (−10) — bad move! |
-| `Esc` | Quit early (saves progress) |
-
-**Key constants:**
-
-| Constant | Default | Description |
-|---|---|---|
-| `FEEDBACK_WEIGHT` | 10.0 | Magnitude of +/− keypress signal |
-| `TERMINATE_PENALTY` | 50.0 | Penalty on early episode termination |
-| `STEP_DELAY` | 0.05 s | Seconds per step (slows for reaction time) |
-| `REWARD_MODEL_EPOCHS` | 20 | Gradient steps per episode retraining |
-| `REWARD_MODEL_LR` | 1e-3 | Adam LR for HCRLRewardModel |
-
-**Output:** `experiment-results/ep{N}/hcrl-human/`
-- `hcrl_human_s{seed}_model.npz`
-- `hcrl_human_s{seed}_reward_model.npz`
-- `hcrl_human_s{seed}_history.csv`
-- `hcrl_human_s{seed}_results.png`
-
----
-
-### `train_rlhf.py` — RLHF (oracle)
-
-Automated RLHF using a simulated oracle (no human needed). Agent hyperparameters are identical to the baseline for fair comparison.
-
-**Pipeline:**
-1. Warm-up (20% of episodes): train agent on env reward; collect trajectory segments
-2. Bootstrap: sample segment pairs → oracle labels → train `RewardModel`
-3. RLHF loop: run episodes with reward model signal → collect segments → human labels → retrain
-
-```bash
-uv run python train_rlhf.py --episodes 100 --seed 0
-uv run python train_rlhf.py --episodes 200 --seed 1
-```
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `--episodes` | int | 100 | Total training episodes |
-| `--seed` | int | 0 | Random seed |
-
-**Key constants:**
-
-| Constant | Default | Description |
-|---|---|---|
-| `WARMUP_FRACTION` | 0.20 | Fraction of episodes used as env-reward warm-up |
-| `EPISODES_PER_ITER` | 8 | Policy episodes per RLHF iteration |
-| `SEGMENT_LENGTH` | 25 | Timesteps per trajectory clip |
-| `WARMUP_SEGMENTS` | 40 | Initial clips before RL starts |
-| `SEGMENTS_PER_ITER` | 8 | New clips per iteration |
-| `PAIRS_PER_ITER` | 24 | Preference queries per reward-model update |
-| `REWARD_MODEL_EPOCHS` | 40 | Gradient steps per update |
-| `SEGMENT_BUFFER_SIZE` | 400 | Max clips in replay buffer |
-| `REWARD_MODEL_LR` | 3e-4 | Adam LR for RewardModel |
-
-**Output:** `experiment-results/ep{N}/rlhf-oracle/`
-- `rlhf_oracle_s{seed}_model.npz`
-- `rlhf_oracle_s{seed}_reward_model.npz`
-- `rlhf_oracle_s{seed}_history.csv`
-- `rlhf_oracle_s{seed}_results.png`
-
----
-
-### `train_rlhf_human.py` — RLHF (human)
-
-Interactive RLHF: a pygame window shows pairs of CartPole clips. You press `A`/`B`/`S` to label which looks better. Clip length and FPS scale up as training progresses (short/slow early → longer/faster later).
-
-```bash
-uv run python train_rlhf_human.py --episodes 100 --seed 0
-uv run python train_rlhf_human.py --episodes 200 --seed 1
-```
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `--episodes` | int | 100 | Total training episodes |
-| `--seed` | int | 0 | Random seed |
-
-**Controls during labelling:**
-
-| Key | Meaning |
-|---|---|
-| `A` | Clip A was better (μ = 1.0) |
-| `B` | Clip B was better (μ = 0.0) |
-| `S` | Skip / tie (μ = 0.5) |
-| `Esc` | Stop early, save and exit |
-
-**Key constants:**
-
-| Constant | Default | Description |
-|---|---|---|
-| `WARMUP_FRACTION` | 0.20 | Fraction of episodes used as env-reward warm-up |
-| `EPISODES_PER_ITER` | 8 | Policy episodes per RLHF iteration |
-| `SEGMENT_LENGTH` | 50 | Starting clip length (scales to 100 by last iteration) |
-| `CLIP_FPS` | 30 | Starting playback FPS (scales to 45 by last iteration) |
-| `WARMUP_PAIRS` | 10 | Pairs shown during bootstrap round |
-| `PAIRS_PER_ITER` | 4 | Pairs labelled per iteration (low to avoid fatigue) |
-| `REWARD_MODEL_EPOCHS` | 50 | Gradient steps after each labelling round |
-| `REWARD_MODEL_LR` | 3e-4 | Adam LR for RewardModel |
-
-**Output:** `experiment-results/ep{N}/rlhf-human/`
-- `rlhf_human_s{seed}_model.npz`
-- `rlhf_human_s{seed}_reward_model.npz`
-- `rlhf_human_s{seed}_history.csv`
-- `rlhf_human_s{seed}_results.png`
-
----
-
-### `feedback_timing_experiment.py`
-
-Tests **when** during training HCRL feedback is most effective. Trains 4 conditions × 3 seeds = 12 runs. Each condition uses `oracle_feedback` + `HCRLRewardModel`.
-
-| Condition | Feedback window |
-|---|---|
-| Early | 0% → 20% of episodes |
-| Mid | 40% → 60% of episodes |
-| Late | 80% → 100% of episodes |
-| Full Feedback | 0% → 100% (always on) |
-
-Outside the feedback window, the `HCRLRewardModel` (trained on in-window data) continues to predict rewards. This tests whether feedback learned early/mid/late generalizes.
-
-```bash
-# Automated (oracle + HCRLRewardModel, no keyboard)
-uv run python feedback_timing_experiment.py --auto --episodes 100
-uv run python feedback_timing_experiment.py --auto --episodes 200
-
-# Analyze only (re-generate charts from saved results)
-uv run python feedback_timing_experiment.py --analyze --episodes 100
-
-# Interactive (you give feedback via keyboard — seed 0 only)
-uv run python feedback_timing_experiment.py --episodes 100
-```
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `--episodes` | int | 100 | Training episodes per condition |
-| `--auto` | flag | off | Use oracle instead of keyboard |
-| `--analyze` | flag | off | Skip training, run analysis only |
-| `--skip-charts` | flag | off | Skip `plt.show()` |
-
-**Key constants:**
-
-| Constant | Default | Description |
-|---|---|---|
-| `SEEDS` | [0, 1, 2] | Random seeds |
-| `MAX_TIMESTEPS` | 200 | Episode length cap |
-| `TERMINATE_PENALTY` | 5000 | Early-termination penalty |
-| `feedback_weight` | 10.0 | Oracle reward magnitude |
-
-**Output:** `experiment-results/ep{N}/timing-experiment/`
-- `{condition}_s{seed}_model.npz`
-- `{condition}_s{seed}_reward_model.npz`
-- `{condition}_s{seed}_history.csv`
-- `{condition}_s{seed}_feedback_log.csv`
-- `timing_experiment_results.png`
-
-Analysis prints a **Mann-Whitney U test** (one-sided) for each condition vs. baseline.
-
----
-
-### `sensitivity_analysis.py`
-
-Tests how **feedback magnitude** affects learning. Full Feedback window (all episodes), 3 seeds × 3 weights = 9 runs. Each run uses `oracle_feedback` + `HCRLRewardModel`.
-
-```bash
-uv run python sensitivity_analysis.py --episodes 100
-uv run python sensitivity_analysis.py --episodes 200
-
-# Analyze only
-uv run python sensitivity_analysis.py --episodes 100 --analyze
-```
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `--episodes` | int | 100 | Training episodes per weight |
-| `--analyze` | flag | off | Skip training, run analysis only |
-| `--skip-charts` | flag | off | Skip `plt.show()` |
-
-**Key constants:**
-
-| Constant | Default | Description |
-|---|---|---|
-| `FEEDBACK_WEIGHTS` | [5, 20, 50] | Reward magnitudes to test |
-| `SEEDS` | [0, 1, 2] | Random seeds |
-| `MAX_TIMESTEPS` | 200 | Episode length cap |
-| `TERMINATE_PENALTY` | 5000 | Early-termination penalty |
-
-**Output:** `experiment-results/ep{N}/sensitivity/`
-- `w{weight}_s{seed}_model.npz`
-- `w{weight}_s{seed}_reward_model.npz`
-- `w{weight}_s{seed}.csv`
-- `sensitivity_results.png`
-
----
-
-### `run_all.py` — Full Automated Pipeline
-
-Runs the complete automated experiment in one command:  
-baseline → timing experiment → sensitivity analysis → compare models → convergence analysis.
-
-No human input required.
-
-```bash
-uv run python run_all.py --episodes 100
-uv run python run_all.py --episodes 200
-
-# Skip training, re-run analysis only
-uv run python run_all.py --episodes 200 --analyze-only
-
-# Headless (no plt.show)
-uv run python run_all.py --episodes 200 --skip-charts
-```
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `--episodes` | int | 200 | Training episodes per condition |
-| `--eval-episodes` | int | 100 | Gameplay evaluation episodes per model |
-| `--analyze-only` | flag | off | Skip all training |
-| `--skip-charts` | flag | off | Skip chart steps |
-
----
-
-### `compare_all.py` — Big-picture comparison
-
-Compares **all 12 methods** under the same conditions (same `--episodes`, same `--seed`). Missing models are skipped gracefully.
-
-**Methods compared:**
-
-| Group | Methods |
-|---|---|
-| Baseline | Baseline Q-Learning |
-| HCRL | HCRL Early, Mid, Late, Full (timing experiment) |
-| HCRL | HCRL oracle (`train_hcrl.py`) |
-| HCRL | HCRL human (`train_hcrl_human.py`) |
-| Sensitivity | HCRL w=5, w=20, w=50 |
-| RLHF | RLHF oracle, RLHF human |
-
-```bash
-uv run python compare_all.py --episodes 100 --seed 0
-uv run python compare_all.py --episodes 200 --seed 0 --eval-episodes 200
-```
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `--episodes` | int | 100 | Training episode count for all methods |
-| `--seed` | int | 0 | Which seed to load for each method |
-| `--eval-episodes` | int | 100 | Gameplay evaluation episodes per model |
-
-**Output:** `experiment-results/`
-- `compare_all_training.png` — all learning curves overlaid + paradigm-group means
-- `compare_all_gameplay.png` — box plot, bar chart, histogram
-- Console: full stats table + Welch t-test + Cohen's d vs baseline for every method
-
----
-
-### `compare_models.py`
-
-Compare Baseline + 4 HCRL timing conditions. Multi-seed aware (mean ± std shaded bands). Runs Welch's t-test + Cohen's d for each HCRL model vs. baseline.
-
-```bash
-uv run python compare_models.py --episodes 100
-uv run python compare_models.py --episodes 200
-```
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `--episodes` | int | 100 | Which episode-count results to load |
-| `--eval-episodes` | int | 100 | Evaluation gameplay episodes per model |
-
-**Output:** `experiment-results/ep{N}/comparison_training.png`, `comparison_gameplay.png`
-
----
-
-### `convergence_analysis.py`
-
-Measures how fast each model first crosses episode-length thresholds of **50, 100, 150, 200** using a rolling mean.
-
-```bash
-uv run python convergence_analysis.py --episodes 100
-uv run python convergence_analysis.py --episodes 200
-```
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `--episodes` | int | 100 | Which episode-count results to load |
-
-**Output:** `experiment-results/ep{N}/convergence_analysis.png`. Also prints AUC per model — higher = better training efficiency.
-
----
-
-### `analyze_feedback.py`
-
-Analyze timing, frequency, and state distribution of feedback from interactive HCRL sessions.
-
-```bash
-uv run python analyze_feedback.py experiment-results/ep100
-uv run python analyze_feedback.py --compare experiment-results/ep100/timing-experiment
-```
-
----
-
-### `watch.py`
-
-Watch a single trained model play in a pygame window.
-
-```bash
-uv run python watch.py experiment-results/ep100/hcrl-oracle/hcrl_oracle_s0_model.npz
-uv run python watch.py experiment-results/ep100/rlhf-oracle/rlhf_oracle_s0_model.npz 20
-```
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `model_path` | path | required | Path to `.npz` agent file |
-| `num_episodes` | int | 10 | Episodes to watch |
-
----
-
-### `visual_compare.py`
-
-Watch up to **6 models play simultaneously** in a dynamic pygame grid.
-
-| Models | Grid |
-|---|---|
-| 1–2 | 1 × 2 |
-| 3–4 | 2 × 2 |
-| 5–6 | 2 × 3 |
-
-```bash
-# Compare oracle vs human methods (2×2 grid)
-uv run python visual_compare.py \
-  experiment-results/ep100/ep100/baseline_s0_model.npz \
-  experiment-results/ep100/hcrl-oracle/hcrl_oracle_s0_model.npz \
-  experiment-results/ep100/hcrl-human/hcrl_human_s0_model.npz \
-  experiment-results/ep100/rlhf-oracle/rlhf_oracle_s0_model.npz \
-  --labels Baseline "HCRL oracle" "HCRL human" "RLHF oracle" \
-  --episodes 10
-```
-
-| Argument | Type | Default | Description |
-|---|---|---|---|
-| `models` | path(s) | required | 1–6 paths to `.npz` files |
-| `--labels` | str(s) | filename stem | Display labels |
-| `--episodes` | int | 10 | Episodes to play |
-
----
-
-### `webapp.py` — Web Visualizer
-
-Watch trained models in a browser — no pygame required.
-
-```bash
-uv run python webapp.py
-# Open: http://localhost:5000
-```
-
-Features:
-- Auto-discovers all agent `.npz` models from `experiment-results/`, grouped by type
-- Episode slider (1–30) and speed slider (5–60 fps)
-- Live frame streaming via Server-Sent Events (SSE)
-- Per-model stats: current steps, running mean, best episode
-
-**Expose publicly with ngrok:**
-```bash
-# Terminal 1
-uv run python webapp.py
-
-# Terminal 2
-ngrok http 5000
-```
+## Hyperparameter Reference
+
+All constants live in **`cartpole/config.py`** — one file to change them all.
+
+### Agent (shared across all methods)
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `AGENT_LR` | 0.05 | Q-table learning rate α |
+| `AGENT_DISCOUNT` | 0.95 | Discount factor γ |
+| `AGENT_EXPLORE` | 0.50 | Initial ε-greedy exploration |
+| `AGENT_DECAY` | 0.99 | Per-episode exploration decay |
+| `NUM_BINS` | 7 | Discretization bins per state feature |
+| `MAX_TIMESTEPS` | 200 | CartPole episode cap |
+| `GOAL_LENGTH` | 195 | Mean episode length for success |
+| `GOAL_CONSECUTIVE` | 30 | Consecutive episodes for success |
+
+### HCRL / TAMER  (Knox & Stone 2009; Li et al. 2019)
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `HCRL_TRIGGER_PROB` | 0.5 | Oracle firing probability per timestep |
+| `HCRL_FEEDBACK_WEIGHT` | 10.0 | ±magnitude of oracle signal |
+| `HCRL_TERMINATE_PENALTY` | 50.0 | Penalty on early episode termination |
+| `HCRL_RM_LR` | 1e-3 | HCRLRewardModel Adam learning rate |
+| `HCRL_RM_HIDDEN` | 64 | Hidden layer width |
+| `HCRL_RM_EPOCHS` | 20 | Gradient steps per reward-model update |
+
+### VI-TAMER  (Knox & Stone 2012)
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `VI_TAMER_DISCOUNT` | 0.95 | Default γ for Q_H; use `--gamma 0` for plain TAMER |
+
+### RLHF  (Christiano et al. 2017)
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `RLHF_SEGMENT_LENGTH` | 25 | Timesteps per trajectory clip |
+| `RLHF_WARMUP_FRACTION` | 0.20 | Fraction of episodes for warm-up |
+| `RLHF_EPISODES_PER_ITER` | 8 | Policy episodes per RLHF iteration |
+| `RLHF_WARMUP_SEGMENTS` | 40 | Segments collected during warm-up |
+| `RLHF_SEGMENTS_PER_ITER` | 8 | New segments per iteration |
+| `RLHF_PAIRS_PER_ITER` | 24 | Preference queries per reward-model update |
+| `RLHF_RM_EPOCHS` | 40 | Gradient steps per reward-model update |
+| `RLHF_SEGMENT_BUFFER` | 400 | Rolling segment replay buffer size |
+| `RLHF_RM_LR` | 3e-4 | RewardModel Adam learning rate |
+| `RLHF_RM_HIDDEN` | 64 | Hidden layer width |
+
+### RLHF §2.2 Ensemble improvements
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `ENSEMBLE_N_MODELS` | 3 | Number of ensemble members K |
+| `ENSEMBLE_CANDIDATES_MULT` | 10 | Candidate pairs = mult × PAIRS_PER_ITER |
+| `ENSEMBLE_ERROR_PROB` | 0.1 | Oracle human-error rate (§2.2.3) |
+| `ENSEMBLE_VAL_FRACTION` | ≈1/e | Validation split for each bootstrapped model |
+
+### Experiment design
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `SEEDS` | [0, 1, 2] | Random seeds for statistical validity |
+| `SENSITIVITY_WEIGHTS` | [5, 20, 50] | Feedback magnitudes tested |
+| `TIMING_CONDITIONS` | early/mid/late/full | Feedback window fractions |
 
 ---
 
@@ -709,147 +364,69 @@ ngrok http 5000
 
 ```
 experiment-results/
-│
-└── ep{N}/                                  # All results for N-episode runs
+└── ep200/                          # Results for --episodes 200
+    ├── baseline_s0_model.npz       # Q-table weights (seed 0)
+    ├── baseline_s0_history.csv     # Episode lengths (seed 0)
+    ├── baseline_model.npz          # Canonical seed-0 copy
+    ├── episode_history.csv         # Canonical seed-0 history
     │
-    ├── baseline_s{0,1,2}_model.npz         # run.py
-    ├── baseline_s{0,1,2}_history.csv
+    ├── hcrl-oracle/                # HCRL with simulated oracle
+    │   ├── hcrl_oracle_s0_model.npz
+    │   ├── hcrl_oracle_s0_reward_model.npz
+    │   └── hcrl_oracle_s0_history.csv
     │
-    ├── hcrl-oracle/                         # train_hcrl.py
-    │   ├── hcrl_oracle_s{seed}_model.npz
-    │   ├── hcrl_oracle_s{seed}_reward_model.npz
-    │   ├── hcrl_oracle_s{seed}_history.csv
-    │   └── hcrl_oracle_s{seed}_results.png
+    ├── vi-tamer/                   # VI-TAMER (non-myopic TAMER)
+    │   ├── vi_tamer_s0_model.npz
+    │   └── vi_tamer_s0_history.csv
     │
-    ├── hcrl-human/                          # train_hcrl_human.py
-    │   ├── hcrl_human_s{seed}_model.npz
-    │   ├── hcrl_human_s{seed}_reward_model.npz
-    │   ├── hcrl_human_s{seed}_history.csv
-    │   └── hcrl_human_s{seed}_results.png
+    ├── rlhf-oracle/                # RLHF single reward model
+    │   ├── rlhf_oracle_s0_model.npz
+    │   ├── rlhf_oracle_s0_reward_model.npz
+    │   └── rlhf_oracle_s0_history.csv
     │
-    ├── rlhf-oracle/                         # train_rlhf.py
-    │   ├── rlhf_oracle_s{seed}_model.npz
-    │   ├── rlhf_oracle_s{seed}_reward_model.npz
-    │   ├── rlhf_oracle_s{seed}_history.csv
-    │   └── rlhf_oracle_s{seed}_results.png
+    ├── rlhf-ensemble/              # RLHF with ensemble + §2.2 improvements
+    │   ├── rlhf_ensemble_s0_model.npz
+    │   ├── rlhf_ensemble_s0_model_0.npz  (ensemble member 0)
+    │   ├── rlhf_ensemble_s0_model_1.npz
+    │   ├── rlhf_ensemble_s0_model_2.npz
+    │   ├── rlhf_ensemble_s0_normalizer.npz
+    │   └── rlhf_ensemble_s0_history.csv
     │
-    ├── rlhf-human/                          # train_rlhf_human.py
-    │   ├── rlhf_human_s{seed}_model.npz
-    │   ├── rlhf_human_s{seed}_reward_model.npz
-    │   ├── rlhf_human_s{seed}_history.csv
-    │   └── rlhf_human_s{seed}_results.png
+    ├── timing-experiment/          # 4 conditions × 3 seeds
+    │   ├── early_s0_model.npz
+    │   ├── early_s0_history.csv
+    │   ├── early_s0_feedback_log.csv
+    │   └── ... (mid, late, full_feedback)
     │
-    ├── timing-experiment/                   # feedback_timing_experiment.py
-    │   ├── {early,mid,late,full_feedback}_s{seed}_model.npz
-    │   ├── {early,mid,late,full_feedback}_s{seed}_reward_model.npz
-    │   ├── {early,mid,late,full_feedback}_s{seed}_history.csv
-    │   ├── {early,mid,late,full_feedback}_s{seed}_feedback_log.csv
-    │   └── timing_experiment_results.png
-    │
-    ├── sensitivity/                         # sensitivity_analysis.py
-    │   ├── w{5,20,50}_s{seed}_model.npz
-    │   ├── w{5,20,50}_s{seed}_reward_model.npz
-    │   ├── w{5,20,50}_s{seed}.csv
-    │   └── sensitivity_results.png
-    │
-    ├── comparison_training.png              # compare_models.py
-    ├── comparison_gameplay.png
-    └── convergence_analysis.png            # convergence_analysis.py
+    └── sensitivity/                # Weights [5, 20, 50] × 3 seeds
+        ├── w5_s0_model.npz
+        ├── w5_s0_history.csv
+        └── ...
 ```
-
----
-
-## Hyperparameter Reference
-
-### Agent (all methods — identical for fair comparison)
-
-| Parameter | Value | Notes |
-|---|---|---|
-| Learning rate α | 0.05 | Consistent across all scripts |
-| Discount factor γ | 0.95 | Consistent across all scripts |
-| Initial exploration ε₀ | 0.50 | 50% random at start |
-| Exploration decay | 0.99/ep | ~13% at ep 200 |
-| State bins | 7/feature | 4,096 total states |
-
-### HCRL Oracle / Human
-
-| Parameter | Value | Notes |
-|---|---|---|
-| Oracle trigger probability | 0.50 | Models human reaction time |
-| Feedback weight (oracle/human) | 10.0 | Magnitude of +/− signal |
-| Terminate penalty | 50.0 | Proportional to feedback scale |
-| Reward model LR | 1e-3 | Adam, HCRLRewardModel |
-| Reward model hidden | 64 | 4→64→64→1, tanh |
-| Reward model epochs/ep | 20 | Retrained after every episode |
-
-### Timing Experiment / Sensitivity Analysis
-
-| Parameter | Value | Notes |
-|---|---|---|
-| Feedback weights (sensitivity) | 5, 20, 50 | — |
-| Seeds | [0, 1, 2] | 3 seeds for statistical validity |
-| Terminate penalty | 5000 | Historical value kept for comparability |
-
-### RLHF Reward Model
-
-| Parameter | Value | Notes |
-|---|---|---|
-| Architecture | MLP 4→64→64→1 | tanh activations |
-| Optimiser | Adam | β₁=0.9, β₂=0.999 |
-| Learning rate | 3e-4 | RewardModel |
-| Loss | Cross-entropy (Bradley-Terry) | Pairwise preferences |
-| Segment length (oracle) | 25 timesteps | Scales up during human training |
-| Segment length (human) | 50 → 100 timesteps | Grows with iteration number |
 
 ---
 
 ## Development
 
 ```bash
-uv sync                     # install all deps including dev tools
+# Run tests
+uv run pytest
 
-uv run ruff check .         # lint
-uv run ty check             # type check
-uv run pytest               # tests
+# Lint
+uv run ruff check .
+
+# Format
+uv run black .
+uv run isort .
 ```
-
-Pre-commit hooks run automatically on `git commit` after:
-```bash
-uv run pre-commit install
-```
-
----
-
-## Troubleshooting
-
-**Matplotlib/Tk window not showing on Linux:**
-```bash
-sudo apt install python3-tk
-```
-
-**UnicodeEncodeError on Windows:**
-```bash
-set PYTHONIOENCODING=utf-8
-```
-All scripts call `sys.stdout.reconfigure(encoding="utf-8")` at startup.
-
-**`ngrok: command not found`:**
-Add ngrok to PATH or use full path: `C:\path\to\ngrok.exe http 5000`.
-
-**Model file not found in `visual_compare` / `watch`:**
-Paths are relative to the current working directory. Always run from the project root.
-
-**Pygame window freezes during interactive training:**
-Click the window once to bring it into focus before pressing keys.
 
 ---
 
 ## References
 
-Christiano, P., Leike, J., Brown, T. B., Martic, M., Legg, S., & Amodei, D. (2017). Deep reinforcement learning from human preferences. *Advances in Neural Information Processing Systems (NeurIPS)*, 30.
-
-Knox, W. B., & Stone, P. (2009). Interactively shaping agents via human reinforcement: The TAMER framework. *Proceedings of the 5th International Conference on Knowledge Capture (K-CAP)*, pp. 9–16. ACM. https://doi.org/10.1145/1597735.1597738
-
-Barto, A. G., Sutton, R. S., & Anderson, C. W. (1983). Neuronlike adaptive elements that can solve difficult learning control problems. *IEEE Transactions on Systems, Man, and Cybernetics*, SMC-13(5), 834–846.
-
-Sutton, R. S., & Barto, A. G. (2018). *Reinforcement Learning: An Introduction* (2nd ed.). MIT Press.
+| Paper | Key contribution |
+|-------|-----------------|
+| Knox & Stone (2009). *Interactively Shaping Agents via Human Reinforcement: The TAMER Framework.* K-CAP. | TAMER algorithm: per-timestep scalar human feedback; credit assignment; HCRLRewardModel |
+| Knox & Stone (2012). *Reinforcement Learning from Human Reward and Advice.* AAMAS. | VI-TAMER: non-myopic value function Q_H driven by human reward model |
+| Li et al. (2019). *Human-Centered Reinforcement Learning: A Survey.* IEEE THMS. | Survey of HCRL algorithms; categorizes interactive shaping, categorical feedback, policy feedback |
+| Christiano et al. (2017). *Deep Reinforcement Learning from Human Preferences.* NeurIPS. | RLHF: pairwise trajectory preferences; Bradley-Terry reward model; ensemble + uncertainty queries |

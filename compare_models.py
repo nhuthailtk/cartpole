@@ -10,9 +10,10 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from scipy import stats
 
+from cartpole import config as cfg
 from cartpole.agents import QLearningAgent
 
-SEEDS = [0, 1, 2]
+SEEDS = cfg.SEEDS
 
 
 def get_models(episodes: int) -> list[dict]:

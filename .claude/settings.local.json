@@ -6,7 +6,28 @@
       "Bash(uv run:*)",
       "Bash(PYTHONIOENCODING=utf-8 uv run python sensitivity_analysis.py)",
       "Bash(python -c ':*)",
-      "Bash(uv add:*)"
+      "Bash(uv add:*)",
+      "Bash(ls -lh d:/KHDL/SML/ML-Project/*.py)",
+      "Read(//d/KHDL/SML/ML-Project/**)",
+      "Bash(python -c \"import sys; sys.stdout.reconfigure\\(encoding='utf-8'\\); import train_hcrl, train_vi_tamer, train_rlhf, train_rlhf_ensemble; print\\('OK all imports pass'\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import sys; sys.stdout.reconfigure\\(encoding='utf-8'\\); import train_hcrl, train_vi_tamer, train_rlhf, train_rlhf_ensemble; print\\('OK all imports pass'\\)\")",
+      "Bash(.venv/Scripts/python.exe run.py --episodes 100 --seed 0)",
+      "Bash(.venv/Scripts/python.exe run.py --episodes 100)",
+      "Bash(.venv/Scripts/python.exe train_hcrl.py --episodes 100 --seed 0)",
+      "Bash(.venv/Scripts/python.exe train_hcrl.py --episodes 100 --seed 1)",
+      "Bash(.venv/Scripts/python.exe train_hcrl.py --episodes 100 --seed 2)",
+      "Bash(.venv/Scripts/python.exe train_vi_tamer.py --episodes 100 --seed 0)",
+      "Bash(.venv/Scripts/python.exe train_vi_tamer.py --episodes 100 --seed 1)",
+      "Bash(.venv/Scripts/python.exe train_vi_tamer.py --episodes 100 --seed 2)",
+      "Bash(.venv/Scripts/python.exe train_rlhf.py --episodes 100 --seed 0)",
+      "Bash(.venv/Scripts/python.exe train_rlhf.py --episodes 100 --seed 1)",
+      "Bash(.venv/Scripts/python.exe train_rlhf.py --episodes 100 --seed 2)",
+      "Bash(.venv/Scripts/python.exe train_rlhf_ensemble.py --episodes 100 --seed 0)",
+      "Bash(.venv/Scripts/python.exe train_rlhf_ensemble.py --episodes 100 --seed 1)",
+      "Bash(.venv/Scripts/python.exe train_rlhf_ensemble.py --episodes 100 --seed 2)",
+      "Bash(.venv/Scripts/python.exe feedback_timing_experiment.py --episodes 100 --auto)",
+      "Bash(.venv/Scripts/python.exe compare_models.py --episodes 100 --eval-episodes 100)",
+      "Bash(.venv/Scripts/python.exe _stats.py)"
     ]
   }
 }
