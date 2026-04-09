@@ -40,13 +40,13 @@ SEEDS = cfg.SEEDS
 
 
 
-def get_all_models(episodes: int, seed: int) -> list[dict]:
+def get_all_models(episodes: int, seed: int, feedback_weight: float = cfg.HCRL_FEEDBACK_WEIGHT) -> list[dict]:
     base         = OUTPUT_DIR / f"ep{episodes}"
     timing       = base / "timing-experiment"
     oracle       = base / "rlhf-oracle"
     human        = base / "rlhf-human"
-    hcrl_oracle  = base / "hcrl-oracle"
-    hcrl_human   = base / "hcrl-human"
+    hcrl_oracle  = base / f"hcrl-oracle-fw{feedback_weight:g}"
+    hcrl_human   = base / f"hcrl-human-fw{feedback_weight:g}"
 
     return [
         # ── Baseline ──────────────────────────────────────────────────────
@@ -443,13 +443,17 @@ def main() -> None:
         "--eval-episodes", type=int, default=100,
         help="Gameplay evaluation episodes per model (default: 100)",
     )
+    parser.add_argument(
+        "--feedback-weight", type=float, default=cfg.HCRL_FEEDBACK_WEIGHT,
+        help="Feedback weight used when training HCRL oracle/human (default: %(default)s)",
+    )
     args = parser.parse_args()
 
-    models = get_all_models(args.episodes, args.seed)
+    models = get_all_models(args.episodes, args.seed, args.feedback_weight)
 
     print("=" * 70)
     print(f"  FULL COMPARISON: Baseline | HCRL ×4 | RLHF ×2")
-    print(f"  episodes={args.episodes}  seed={args.seed}  eval={args.eval_episodes}")
+    print(f"  episodes={args.episodes}  seed={args.seed}  eval={args.eval_episodes}  feedback_weight=±{args.feedback_weight:g}")
     print("=" * 70)
 
     print(f"\n[1/2] Training curves…")

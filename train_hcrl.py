@@ -193,15 +193,15 @@ def save_history(history: EpisodeHistory, experiment_dir: str,
 # Oracle training (automated)
 # ---------------------------------------------------------------------------
 
-def train(total_episodes: int, seed: int) -> None:
+def train(total_episodes: int, seed: int, feedback_weight: float = cfg.HCRL_FEEDBACK_WEIGHT) -> None:
     """Train HCRL with simulated oracle feedback (no human required)."""
-    out = pathlib.Path(cfg.experiment_dir(total_episodes, "hcrl-oracle"))
+    out = pathlib.Path(cfg.experiment_dir(total_episodes, f"hcrl-oracle-fw{feedback_weight:g}"))
     out.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
     print(f"  HCRL (oracle)  —  {total_episodes} episodes  seed={seed}")
     print(f"  Oracle trigger prob : {cfg.HCRL_TRIGGER_PROB}")
-    print(f"  Feedback weight     : ±{cfg.HCRL_FEEDBACK_WEIGHT}")
+    print(f"  Feedback weight     : ±{feedback_weight}")
     print(f"  Output: {out}")
     print("=" * 60)
 
@@ -224,6 +224,7 @@ def train(total_episodes: int, seed: int) -> None:
         ep_len, new_obs, new_rew, _ = run_hcrl_episode(
             env, agent, reward_model if model_ready else None, rng,
             in_feedback_window=True,
+            feedback_weight=feedback_weight,
         )
         episode_lengths.append(ep_len)
         rm_obs_buf.extend(new_obs)
@@ -260,9 +261,9 @@ def train(total_episodes: int, seed: int) -> None:
 # Human training (interactive)
 # ---------------------------------------------------------------------------
 
-def train_human(total_episodes: int, seed: int) -> None:
+def train_human(total_episodes: int, seed: int, feedback_weight: float = cfg.HCRL_FEEDBACK_WEIGHT) -> None:
     """Train HCRL with real human feedback via arrow keys."""
-    out = pathlib.Path(cfg.experiment_dir(total_episodes, "hcrl-human"))
+    out = pathlib.Path(cfg.experiment_dir(total_episodes, f"hcrl-human-fw{feedback_weight:g}"))
     out.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
@@ -306,14 +307,14 @@ def train_human(total_episodes: int, seed: int) -> None:
                         if event.key == pygame.K_ESCAPE:
                             quit_requested = True
                         elif event.key == pygame.K_UP:
-                            human_reward = cfg.HCRL_FEEDBACK_WEIGHT
+                            human_reward = feedback_weight
                             ep_feedback += 1
                             total_feedback += 1
                             rm_obs_buf.append(obs.copy())
                             rm_reward_buf.append(human_reward)
                             print(f"  [+] ep={ep+1:3d} t={t:3d}  angle={obs[2]:+.3f}  cart={obs[0]:+.2f}")
                         elif event.key == pygame.K_DOWN:
-                            human_reward = -cfg.HCRL_FEEDBACK_WEIGHT
+                            human_reward = -feedback_weight
                             ep_feedback += 1
                             total_feedback += 1
                             rm_obs_buf.append(obs.copy())
@@ -433,13 +434,15 @@ def save_history_csv_simple(episode_lengths: list[int], path: pathlib.Path) -> N
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="HCRL training (oracle or human feedback)")
-    parser.add_argument("--episodes", type=int, default=100)
-    parser.add_argument("--seed",     type=int, default=0)
+    parser.add_argument("--episodes",        type=int,   default=100)
+    parser.add_argument("--seed",            type=int,   default=0)
+    parser.add_argument("--feedback-weight", type=float, default=cfg.HCRL_FEEDBACK_WEIGHT,
+                        help="Magnitude of +/- oracle reward signal (default: %(default)s)")
     parser.add_argument("--human",    action="store_true",
                         help="Use real human arrow-key feedback instead of simulated oracle")
     args = parser.parse_args()
 
     if args.human:
-        train_human(args.episodes, args.seed)
+        train_human(args.episodes, args.seed, args.feedback_weight)
     else:
-        train(args.episodes, args.seed)
+        train(args.episodes, args.seed, args.feedback_weight)

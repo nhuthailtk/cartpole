@@ -214,10 +214,12 @@ uv run python run.py --episodes 200
 
 # 2. HCRL / TAMER  (Li et al. 2019, Knox & Stone 2009)
 uv run python train_hcrl.py --episodes 200 --seed 0
+uv run python train_hcrl.py --episodes 200 --seed 0 --feedback-weight 5   # sweep weight
 
 # 3. VI-TAMER  (Knox & Stone 2012, non-myopic)
 uv run python train_vi_tamer.py --episodes 200 --seed 0
-uv run python train_vi_tamer.py --episodes 200 --seed 0 --gamma 0   # γ=0 → plain TAMER
+uv run python train_vi_tamer.py --episodes 200 --seed 0 --gamma 0              # γ=0 → plain TAMER
+uv run python train_vi_tamer.py --episodes 200 --seed 0 --feedback-weight 20  # sweep weight
 
 # 4. RLHF baseline  (Christiano et al. 2017)
 uv run python train_rlhf.py --episodes 200 --seed 0
@@ -251,9 +253,9 @@ uv run python train_rlhf_human.py
 | Script | Paper | Notes |
 |--------|-------|-------|
 | `run.py` | — | Baseline Q-Learning, 3 seeds |
-| `train_hcrl.py` | Li et al. (2019) / Knox & Stone (2009) | TAMER, oracle |
+| `train_hcrl.py` | Li et al. (2019) / Knox & Stone (2009) | TAMER, oracle; `--feedback-weight` controls signal magnitude |
 | `train_hcrl_human.py` | Li et al. (2019) / Knox & Stone (2009) | TAMER, real human |
-| `train_vi_tamer.py` | Knox & Stone (2012) | VI-TAMER, `--gamma` controls γ |
+| `train_vi_tamer.py` | Knox & Stone (2012) | VI-TAMER; `--gamma` controls γ, `--feedback-weight` controls signal magnitude |
 | `train_rlhf.py` | Christiano et al. (2017) | Single RewardModel |
 | `train_rlhf_ensemble.py` | Christiano et al. (2017) §2.2 | Ensemble + all improvements |
 | `train_rlhf_human.py` | Christiano et al. (2017) | Real human clip comparison |
@@ -308,7 +310,7 @@ All constants live in **`cartpole/config.py`** — one file to change them all.
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `HCRL_TRIGGER_PROB` | 0.5 | Oracle firing probability per timestep |
-| `HCRL_FEEDBACK_WEIGHT` | 10.0 | ±magnitude of oracle signal |
+| `HCRL_FEEDBACK_WEIGHT` | 10.0 | ±magnitude of oracle signal; override with `--feedback-weight` |
 | `HCRL_TERMINATE_PENALTY` | 50.0 | Penalty on early episode termination |
 | `HCRL_RM_LR` | 1e-3 | HCRLRewardModel Adam learning rate |
 | `HCRL_RM_HIDDEN` | 64 | Hidden layer width |

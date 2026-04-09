@@ -55,14 +55,14 @@ from cartpole.train_utils import (
 # Oracle training (automated)
 # ---------------------------------------------------------------------------
 
-def train(total_episodes: int, seed: int, gamma: float) -> None:
-    out = pathlib.Path(cfg.experiment_dir(total_episodes, "vi-tamer"))
+def train(total_episodes: int, seed: int, gamma: float, feedback_weight: float = cfg.HCRL_FEEDBACK_WEIGHT) -> None:
+    out = pathlib.Path(cfg.experiment_dir(total_episodes, f"vi-tamer-fw{feedback_weight:g}"))
     out.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
     print(f"  VI-TAMER  —  {total_episodes} episodes  seed={seed}  γ={gamma}")
     print(f"  Oracle trigger prob : {cfg.HCRL_TRIGGER_PROB}")
-    print(f"  Feedback weight     : ±{cfg.HCRL_FEEDBACK_WEIGHT}")
+    print(f"  Feedback weight     : ±{feedback_weight}")
     print(f"  Output: {out}")
     print("=" * 60)
     print(f"\n  TAMER (γ=0): policy = argmax_a R_H(s,a) [immediate]")
@@ -87,6 +87,7 @@ def train(total_episodes: int, seed: int, gamma: float) -> None:
         ep_len, new_obs, new_rew, _ = run_vi_tamer_episode(
             env, agent, reward_model if model_ready else None, rng,
             in_feedback_window=True,
+            feedback_weight=feedback_weight,
         )
         episode_lengths.append(ep_len)
         rm_obs_buf.extend(new_obs)
@@ -123,9 +124,9 @@ def train(total_episodes: int, seed: int, gamma: float) -> None:
 # Human training (interactive)
 # ---------------------------------------------------------------------------
 
-def train_human(total_episodes: int, seed: int, gamma: float) -> None:
+def train_human(total_episodes: int, seed: int, gamma: float, feedback_weight: float = cfg.HCRL_FEEDBACK_WEIGHT) -> None:
     """Train VI-TAMER with real human feedback via arrow keys."""
-    out = pathlib.Path(cfg.experiment_dir(total_episodes, "vi-tamer-human"))
+    out = pathlib.Path(cfg.experiment_dir(total_episodes, f"vi-tamer-human-fw{feedback_weight:g}"))
     out.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
@@ -169,14 +170,14 @@ def train_human(total_episodes: int, seed: int, gamma: float) -> None:
                         if event.key == pygame.K_ESCAPE:
                             quit_requested = True
                         elif event.key == pygame.K_UP:
-                            human_reward = cfg.HCRL_FEEDBACK_WEIGHT
+                            human_reward = feedback_weight
                             ep_feedback += 1
                             total_feedback += 1
                             rm_obs_buf.append(obs.copy())
                             rm_reward_buf.append(human_reward)
                             print(f"  [+] ep={ep+1:3d} t={t:3d}  angle={obs[2]:+.3f}  cart={obs[0]:+.2f}")
                         elif event.key == pygame.K_DOWN:
-                            human_reward = -cfg.HCRL_FEEDBACK_WEIGHT
+                            human_reward = -feedback_weight
                             ep_feedback += 1
                             total_feedback += 1
                             rm_obs_buf.append(obs.copy())
@@ -299,15 +300,17 @@ def _plot(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VI-TAMER training (oracle or human feedback)")
-    parser.add_argument("--episodes", type=int, default=100)
-    parser.add_argument("--seed",     type=int, default=0)
-    parser.add_argument("--gamma",    type=float, default=cfg.VI_TAMER_DISCOUNT,
+    parser.add_argument("--episodes",        type=int,   default=100)
+    parser.add_argument("--seed",            type=int,   default=0)
+    parser.add_argument("--gamma",           type=float, default=cfg.VI_TAMER_DISCOUNT,
                         help="Discount factor γ (0 = plain TAMER)")
+    parser.add_argument("--feedback-weight", type=float, default=cfg.HCRL_FEEDBACK_WEIGHT,
+                        help="Magnitude of +/- oracle reward signal (default: %(default)s)")
     parser.add_argument("--human",    action="store_true",
                         help="Use real human arrow-key feedback instead of simulated oracle")
     args = parser.parse_args()
 
     if args.human:
-        train_human(args.episodes, args.seed, args.gamma)
+        train_human(args.episodes, args.seed, args.gamma, args.feedback_weight)
     else:
-        train(args.episodes, args.seed, args.gamma)
+        train(args.episodes, args.seed, args.gamma, args.feedback_weight)
